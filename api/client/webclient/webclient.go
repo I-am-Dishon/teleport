@@ -206,6 +206,8 @@ type PingResponse struct {
 	ServerVersion string `json:"server_version"`
 	// MinClientVersion is the minimum client version required by the server.
 	MinClientVersion string `json:"min_client_version"`
+	// ClientAddr
+	ClientAddr string
 }
 
 // ProxySettings contains basic information about proxy settings
