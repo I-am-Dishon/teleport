@@ -1116,16 +1116,6 @@ func NewClient(c *Config) (tc *TeleportClient, err error) {
 		}
 	}
 
-	if tc.ClientAddr == "" {
-		resp, err := tc.Ping(context.TODO())
-		if err != nil {
-			return nil, trace.Wrap(err)
-		} else {
-			tc.ClientAddr = resp.ClientAddr
-			log.Debugf("Set client address: %v", resp.ClientAddr)
-		}
-	}
-
 	return tc, nil
 }
 
