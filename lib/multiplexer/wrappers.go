@@ -21,7 +21,9 @@ import (
 	"context"
 	"net"
 
+	"github.com/gravitational/teleport"
 	"github.com/gravitational/trace"
+	log "github.com/sirupsen/logrus"
 )
 
 // Conn is a connection wrapper that supports
@@ -59,6 +61,9 @@ func (c *Conn) LocalAddr() net.Addr {
 // RemoteAddr returns remote address of the connection
 func (c *Conn) RemoteAddr() net.Addr {
 	if c.proxyLine != nil {
+		log.WithFields(log.Fields{
+			trace.Component: teleport.Component("mx"),
+		}).Debugf("RemoteAddr proxyLineSource: %v", c.proxyLine.Source)
 		return &c.proxyLine.Source
 	}
 	return c.Conn.RemoteAddr()

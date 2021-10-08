@@ -382,6 +382,7 @@ func (s *Server) acceptConnections() {
 	s.log.Debugf("Listening on %v.", addr)
 	for {
 		conn, err := s.listener.Accept()
+		s.log.Debugf("RemoteAddr from server: %v", conn.RemoteAddr().String())
 		if err != nil {
 			if s.isClosed() {
 				s.log.Debugf("Server %v has closed.", addr)
@@ -426,15 +427,18 @@ func (s *Server) HandleConnection(conn net.Conn) {
 		return
 	}
 	defer s.limiter.ReleaseConnection(remoteAddr)
+	s.log.Debugf("RemoteAddr from conn: %v", conn.RemoteAddr().String())
 
 	// apply idle read/write timeout to this connection.
 	conn = utils.ObeyIdleTimeout(conn,
 		defaults.DefaultIdleConnectionDuration,
 		s.component)
+	s.log.Debugf("RemoteAddr from conn ObeyIdleTimeout: %v", conn.RemoteAddr().String())
 
 	// Wrap connection with a tracker used to monitor how much data was
 	// transmitted and received over the connection.
 	wconn := utils.NewTrackingConn(conn)
+	s.log.Debugf("RemoteAddr from wconn: %v", wconn.RemoteAddr().String())
 
 	// create a new SSH server which handles the handshake (and pass the custom
 	// payload structure which will be populated only when/if this connection
@@ -444,6 +448,7 @@ func (s *Server) HandleConnection(conn net.Conn) {
 		conn.SetDeadline(time.Time{})
 		return
 	}
+	s.log.Debugf("RemoteAddr from sconn: %v", sconn.RemoteAddr().String())
 
 	certType := "unknown"
 	if sconn.Permissions != nil {

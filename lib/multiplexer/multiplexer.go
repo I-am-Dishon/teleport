@@ -181,6 +181,7 @@ func (m *Mux) Serve() error {
 				tcpConn.SetKeepAlive(true)
 				tcpConn.SetKeepAlivePeriod(3 * time.Minute)
 			}
+			m.Debug("detectAndForward", conn.RemoteAddr().String())
 			go m.detectAndForward(conn)
 			continue
 		}
@@ -219,6 +220,7 @@ func (m *Mux) detectAndForward(conn net.Conn) {
 		return
 	}
 
+	m.Debugf("Detected proto: %v", connWrapper.protocol)
 	switch connWrapper.protocol {
 	case ProtoTLS:
 		if m.DisableTLS {
@@ -226,6 +228,10 @@ func (m *Mux) detectAndForward(conn net.Conn) {
 			conn.Close()
 			return
 		}
+		log.WithFields(log.Fields{
+			trace.Component: teleport.Component("mx"),
+		}).Debugf("hi")
+		m.Debugf("RemoteAddr from mux tls: %v", connWrapper.RemoteAddr().String())
 		select {
 		case m.tlsListener.connC <- connWrapper:
 		case <-m.context.Done():
@@ -238,6 +244,8 @@ func (m *Mux) detectAndForward(conn net.Conn) {
 			conn.Close()
 			return
 		}
+		m.Debugf("RemoteAddr from mux ssh: %v", connWrapper.RemoteAddr().String())
+		m.Debugf("RemoteAddr proxyLineSource: %v", connWrapper.proxyLine.Source)
 		select {
 		case m.sshListener.connC <- connWrapper:
 		case <-m.context.Done():
@@ -269,6 +277,15 @@ func (m *Mux) detectAndForward(conn net.Conn) {
 
 func detect(conn net.Conn, enableProxyProtocol bool) (*Conn, error) {
 	reader := bufio.NewReader(conn)
+	if b, err := reader.Peek(1000); b != nil {
+		log.WithFields(log.Fields{
+			trace.Component: teleport.Component("mx"),
+		}).Debugf("peeked Conn: %v", string(b))
+	} else if err != nil {
+		log.WithFields(log.Fields{
+			trace.Component: teleport.Component("mx"),
+		}).Debugf("peeked Conn: %v", string(b))
+	}
 
 	// the first attempt is to parse optional proxy
 	// protocol line that is injected by load balancers
