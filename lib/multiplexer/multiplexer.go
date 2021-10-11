@@ -175,6 +175,7 @@ func (m *Mux) Serve() error {
 	backoffTimer := time.NewTicker(5 * time.Second)
 	defer backoffTimer.Stop()
 	for {
+		m.Debug("accept conn")
 		conn, err := m.Listener.Accept()
 		if err == nil {
 			if tcpConn, ok := conn.(*net.TCPConn); ok {
@@ -186,6 +187,7 @@ func (m *Mux) Serve() error {
 			continue
 		}
 		if m.isClosed() {
+			m.Debug("MUX IS CLOSESD")
 			return nil
 		}
 		select {
