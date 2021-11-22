@@ -133,7 +133,7 @@ type defaultModules struct{}
 
 // BuildType returns build type (OSS or Enterprise)
 func (p *defaultModules) BuildType() string {
-	return BuildOSS
+	return BuildEnterprise
 }
 
 // PrintVersion prints the Teleport version.

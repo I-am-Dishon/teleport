@@ -476,6 +476,13 @@ func init() {
 		}
 		return rsc, nil
 	})
+	RegisterResourceUnmarshaler(types.KindOIDCConnector, func(b []byte, opts ...MarshalOption) (types.Resource, error) {
+		rsc, err := UnmarshalOIDCConnector(b) // XXX: Does not support marshal options.
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		return rsc, nil
+	})
 }
 
 // MarshalResource attempts to marshal a resource dynamically, returning NotImplementedError

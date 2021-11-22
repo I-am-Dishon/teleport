@@ -35,7 +35,7 @@ import (
 	"github.com/gravitational/teleport/lib/auth/u2f"
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/events"
-	"github.com/gravitational/teleport/lib/modules"
+	// "github.com/gravitational/teleport/lib/modules"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/services/local"
 	"github.com/gravitational/teleport/lib/sshca"
@@ -543,9 +543,9 @@ const migrationAbortedMessage = "migration to RBAC has aborted because of the ba
 // this function can be called multiple times
 // DELETE IN(7.0)
 func migrateOSS(ctx context.Context, asrv *Server) error {
-	if modules.GetModules().BuildType() != modules.BuildOSS {
-		return nil
-	}
+	// if modules.GetModules().BuildType() != modules.BuildOSS {
+	// 	return nil
+	// }
 	role := services.NewDowngradedOSSAdminRole()
 	existing, err := asrv.GetRole(ctx, role.GetName())
 	if err != nil {
