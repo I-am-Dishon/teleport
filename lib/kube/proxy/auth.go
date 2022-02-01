@@ -1,3 +1,17 @@
+// Copyright 2021 Gravitational, Inc
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package proxy
 
 import (
@@ -91,7 +105,7 @@ func getKubeCreds(ctx context.Context, log logrus.FieldLogger, tpClusterName, ku
 	if trace.IsNotFound(err) || len(cfg.Contexts) == 0 {
 		switch serviceType {
 		case KubeService:
-			return nil, trace.BadParameter("no Kubernetes credentials found; Kubernetes_service requires either a valid kubeconfig_path or to run inside of a Kubernetes pod")
+			return nil, trace.BadParameter("no Kubernetes credentials found; Kubernetes_service requires either a valid kubeconfig_file or to run inside of a Kubernetes pod")
 		case LegacyProxyService:
 			log.Debugf("Could not load Kubernetes credentials. This proxy will still handle Kubernetes requests for trusted teleport clusters or Kubernetes nodes in this teleport cluster")
 		}
@@ -109,7 +123,7 @@ func getKubeCreds(ctx context.Context, log logrus.FieldLogger, tpClusterName, ku
 				tpClusterName: currentContext,
 			}
 		} else {
-			return nil, trace.BadParameter("no Kubernetes current-context found; Kubernetes proxy service requires either a valid kubeconfig_path with a current-context or to run inside of a Kubernetes pod")
+			return nil, trace.BadParameter("no Kubernetes current-context found; Kubernetes proxy service requires either a valid kubeconfig_file with a current-context or to run inside of a Kubernetes pod")
 		}
 	}
 

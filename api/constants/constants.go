@@ -83,6 +83,10 @@ const (
 	// KeepAliveDatabase is the keep alive type for database server.
 	KeepAliveDatabase = "db"
 
+	// KeepAliveWindowsDesktopService is the keep alive type for a Windows
+	// desktop service.
+	KeepAliveWindowsDesktopService = "windows_desktop_service"
+
 	// WindowsOS is the GOOS constant used for Microsoft Windows.
 	WindowsOS = "windows"
 
@@ -97,6 +101,10 @@ const (
 	//
 	// TODO(r0mant): See if we can use net.ErrClosed and errors.Is() instead.
 	UseOfClosedNetworkConnection = "use of closed network connection"
+
+	// FailedToSendCloseNotify is an error message from Go net package
+	// indicating that the connection was closed by the server.
+	FailedToSendCloseNotify = "tls: failed to send closeNotify alert (but connection was closed anyway)"
 
 	// AWSConsoleURL is the URL of AWS management console.
 	AWSConsoleURL = "https://console.aws.amazon.com"
@@ -119,6 +127,9 @@ const (
 	// SecondFactorU2F means that only U2F is supported for 2FA and 2FA is
 	// required for all users.
 	SecondFactorU2F = SecondFactorType("u2f")
+	// SecondFactorWebauthn means that only Webauthn is supported for 2FA and 2FA is
+	// required for all users.
+	SecondFactorWebauthn = SecondFactorType("webauthn")
 	// SecondFactorOn means that all 2FA protocols are supported and 2FA is
 	// required for all users.
 	SecondFactorOn = SecondFactorType("on")
@@ -155,4 +166,9 @@ const (
 	// RemoteAuthServer is a special non-resolvable address that indicates client
 	// requests a connection to the remote auth server.
 	RemoteAuthServer = "@remote-auth-server"
+
+	// ALPNSNIAuthProtocol allows dialing local/remote auth service based on SNI cluster name value.
+	ALPNSNIAuthProtocol = "teleport-auth@"
+	// ALPNSNIProtocolReverseTunnel is TLS ALPN protocol value used to indicate Proxy reversetunnel protocol.
+	ALPNSNIProtocolReverseTunnel = "teleport-reversetunnel"
 )

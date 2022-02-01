@@ -21,14 +21,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gravitational/teleport"
-	"github.com/gravitational/teleport/lib/auth"
-	"github.com/gravitational/teleport/lib/defaults"
-	"github.com/gravitational/teleport/lib/utils"
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/gravitational/teleport"
+	"github.com/gravitational/teleport/lib/auth"
+	"github.com/gravitational/teleport/lib/defaults"
+	"github.com/gravitational/teleport/lib/utils"
 )
 
 // RemoteClusterTunnelManager manages AgentPools for trusted (remote) clusters. It
@@ -59,7 +60,7 @@ type RemoteClusterTunnelManagerConfig struct {
 	AuthClient auth.ClientI
 	// AccessPoint is a lightweight access point that can optionally cache some
 	// values.
-	AccessPoint auth.AccessPoint
+	AccessPoint auth.ProxyAccessPoint
 	// HostSigners is a signer for the host private key.
 	HostSigner ssh.Signer
 	// HostUUID is a unique ID of this host

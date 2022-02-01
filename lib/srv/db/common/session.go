@@ -32,8 +32,10 @@ type Session struct {
 	ID string
 	// ClusterName is the cluster the database service is a part of.
 	ClusterName string
-	// Server is the database server handling the connection.
-	Server types.DatabaseServer
+	// HostID is the id of this database server host.
+	HostID string
+	// Database is the database user is connecting to.
+	Database types.Database
 	// Identity is the identity of the connecting Teleport user.
 	Identity tlsca.Identity
 	// Checker is the access checker for the identity.
@@ -55,5 +57,5 @@ type Session struct {
 // String returns string representation of the session parameters.
 func (c *Session) String() string {
 	return fmt.Sprintf("db[%v] identity[%v] dbUser[%v] dbName[%v]",
-		c.Server.GetName(), c.Identity.Username, c.DatabaseUser, c.DatabaseName)
+		c.Database.GetName(), c.Identity.Username, c.DatabaseUser, c.DatabaseName)
 }

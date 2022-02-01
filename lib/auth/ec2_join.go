@@ -226,7 +226,7 @@ func appExists(ctx context.Context, presence services.Presence, hostID string) (
 		return false, trace.Wrap(err)
 	}
 	for _, namespace := range namespaces {
-		apps, err := presence.GetAppServers(ctx, namespace.GetName())
+		apps, err := presence.GetApplicationServers(ctx, namespace.GetName())
 		if err != nil {
 			return false, trace.Wrap(err)
 		}

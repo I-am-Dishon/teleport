@@ -29,7 +29,10 @@ type Services interface {
 	DynamicAccessCore
 	Presence
 	Restrictions
+	Apps
+	Databases
 	AppSession
 	types.WebSessionsGetter
 	types.WebTokensGetter
+	WindowsDesktops
 }

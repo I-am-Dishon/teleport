@@ -22,11 +22,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
-	"github.com/gravitational/teleport/api/defaults"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gravitational/teleport/api/defaults"
 )
 
 func newPingHandler(path string) http.Handler {
@@ -103,20 +103,16 @@ func TestPlainHttpFallback(t *testing.T) {
 }
 
 func TestGetTunnelAddr(t *testing.T) {
-	ctx := context.Background()
-	t.Run("should use TELEPORT_TUNNEL_PUBLIC_ADDR", func(t *testing.T) {
-		os.Setenv(defaults.TunnelPublicAddrEnvar, "tunnel.example.com:4024")
-		t.Cleanup(func() { os.Unsetenv(defaults.TunnelPublicAddrEnvar) })
-		tunnelAddr, err := GetTunnelAddr(ctx, "", true, nil)
-		require.NoError(t, err)
-		require.Equal(t, "tunnel.example.com:4024", tunnelAddr)
-	})
+	t.Setenv(defaults.TunnelPublicAddrEnvar, "tunnel.example.com:4024")
+	tunnelAddr, err := GetTunnelAddr(context.Background(), "", true, nil)
+	require.NoError(t, err)
+	require.Equal(t, "tunnel.example.com:4024", tunnelAddr)
 }
 
 func TestTunnelAddr(t *testing.T) {
 	type testCase struct {
 		proxyAddr          string
-		settings           SSHProxySettings
+		settings           ProxySettings
 		expectedTunnelAddr string
 	}
 
@@ -131,42 +127,96 @@ func TestTunnelAddr(t *testing.T) {
 
 	t.Run("should use TunnelPublicAddr", testTunnelAddr(testCase{
 		proxyAddr: "proxy.example.com",
-		settings: SSHProxySettings{
-			TunnelPublicAddr: "tunnel.example.com:4024",
-			PublicAddr:       "public.example.com",
-			SSHPublicAddr:    "ssh.example.com",
-			TunnelListenAddr: "[::]:5024",
+		settings: ProxySettings{
+			SSH: SSHProxySettings{
+				TunnelPublicAddr: "tunnel.example.com:4024",
+				PublicAddr:       "public.example.com",
+				SSHPublicAddr:    "ssh.example.com",
+				TunnelListenAddr: "[::]:5024",
+			},
 		},
 		expectedTunnelAddr: "tunnel.example.com:4024",
 	}))
 	t.Run("should use SSHPublicAddr and TunnelListenAddr", testTunnelAddr(testCase{
 		proxyAddr: "proxy.example.com",
-		settings: SSHProxySettings{
-			SSHPublicAddr:    "ssh.example.com",
-			PublicAddr:       "public.example.com",
-			TunnelListenAddr: "[::]:5024",
+		settings: ProxySettings{
+			SSH: SSHProxySettings{
+				SSHPublicAddr:    "ssh.example.com",
+				PublicAddr:       "public.example.com",
+				TunnelListenAddr: "[::]:5024",
+			},
 		},
 		expectedTunnelAddr: "ssh.example.com:5024",
 	}))
 	t.Run("should use PublicAddr and TunnelListenAddr", testTunnelAddr(testCase{
 		proxyAddr: "proxy.example.com",
-		settings: SSHProxySettings{
-			PublicAddr:       "public.example.com",
-			TunnelListenAddr: "[::]:5024",
+		settings: ProxySettings{
+			SSH: SSHProxySettings{
+				PublicAddr:       "public.example.com",
+				TunnelListenAddr: "[::]:5024",
+			},
 		},
 		expectedTunnelAddr: "public.example.com:5024",
 	}))
 	t.Run("should use PublicAddr and SSHProxyTunnelListenPort", testTunnelAddr(testCase{
 		proxyAddr: "proxy.example.com",
-		settings: SSHProxySettings{
-			PublicAddr: "public.example.com",
+		settings: ProxySettings{
+			SSH: SSHProxySettings{
+				PublicAddr: "public.example.com",
+			},
 		},
 		expectedTunnelAddr: "public.example.com:3024",
 	}))
 	t.Run("should use proxyAddr and SSHProxyTunnelListenPort", testTunnelAddr(testCase{
 		proxyAddr:          "proxy.example.com",
-		settings:           SSHProxySettings{},
+		settings:           ProxySettings{SSH: SSHProxySettings{}},
 		expectedTunnelAddr: "proxy.example.com:3024",
+	}))
+	t.Run("should use PublicAddr with ProxyWebPort if TLSRoutingEnabled was enabled", testTunnelAddr(testCase{
+		proxyAddr: "proxy.example.com:443",
+		settings: ProxySettings{
+			SSH: SSHProxySettings{
+				PublicAddr:       "public.example.com",
+				TunnelListenAddr: "[::]:5024",
+				TunnelPublicAddr: "tpa.example.com:3032",
+			},
+			TLSRoutingEnabled: true,
+		},
+		expectedTunnelAddr: "public.example.com:443",
+	}))
+	t.Run("should use PublicAddr with custom port if TLSRoutingEnabled was enabled", testTunnelAddr(testCase{
+		proxyAddr: "proxy.example.com:443",
+		settings: ProxySettings{
+			SSH: SSHProxySettings{
+				PublicAddr:       "public.example.com:443",
+				TunnelListenAddr: "[::]:5024",
+				TunnelPublicAddr: "tpa.example.com:3032",
+			},
+			TLSRoutingEnabled: true,
+		},
+		expectedTunnelAddr: "public.example.com:443",
+	}))
+	t.Run("should use proxyAddr with custom ProxyWebPort if TLSRoutingEnabled was enabled", testTunnelAddr(testCase{
+		proxyAddr: "proxy.example.com:443",
+		settings: ProxySettings{
+			SSH: SSHProxySettings{
+				TunnelListenAddr: "[::]:5024",
+				TunnelPublicAddr: "tpa.example.com:3032",
+			},
+			TLSRoutingEnabled: true,
+		},
+		expectedTunnelAddr: "proxy.example.com:443",
+	}))
+	t.Run("should use proxyAddr with default https port if TLSRoutingEnabled was enabled", testTunnelAddr(testCase{
+		proxyAddr: "proxy.example.com",
+		settings: ProxySettings{
+			SSH: SSHProxySettings{
+				TunnelListenAddr: "[::]:5024",
+				TunnelPublicAddr: "tpa.example.com:3032",
+			},
+			TLSRoutingEnabled: true,
+		},
+		expectedTunnelAddr: "proxy.example.com:443",
 	}))
 }
 
@@ -227,7 +277,7 @@ func TestExtract(t *testing.T) {
 			require.True(t, (tc.hostPort == "") == (err != nil))
 			require.Equal(t, tc.hostPort, hostPort)
 
-			host, err := extractHost(tc.addr)
+			host, err := ExtractHost(tc.addr)
 			// Expect err if expected value is empty
 			require.True(t, (tc.host == "") == (err != nil))
 			require.Equal(t, tc.host, host)

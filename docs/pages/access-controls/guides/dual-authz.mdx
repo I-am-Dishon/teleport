@@ -230,7 +230,7 @@ Alice and Ivan can review and approve request using Web UI or CLI:
   <TabItem label="Web UI">
     ![Teleport-Approve](../../../img/access-controls/dual-authz/teleport-6-ivan-approve.png)
   </TabItem>
-  
+
   <TabItem label="CLI">
     ```code
     $ tsh request list
@@ -239,7 +239,7 @@ Alice and Ivan can review and approve request using Web UI or CLI:
     # ------------------------------------ ---------------  ------- ------------------- -------
     # 9c721e54-b049-4ef8-a7f6-c777aa066764 bob@example.com  dbadmin 03 Apr 21 03:58 UTC PENDING
 
-    # tsh request review --approve --reason="hello" 9c721e54-b049-4ef8-a7f6-c777aa066764
+    $ tsh request review --approve --reason="hello" 9c721e54-b049-4ef8-a7f6-c777aa066764
     # Successfully submitted review.  Request state: APPROVED
     ```
   </TabItem>

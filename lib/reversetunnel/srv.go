@@ -78,7 +78,7 @@ type server struct {
 	localAuthClient auth.ClientI
 	// localAccessPoint provides access to a cached subset of the Auth
 	// Server API.
-	localAccessPoint auth.AccessPoint
+	localAccessPoint auth.ProxyAccessPoint
 
 	// srv is the "base class" i.e. the underlying SSH server
 	srv     *sshutils.Server
@@ -96,7 +96,7 @@ type server struct {
 	clusterPeers map[string]*clusterPeers
 
 	// newAccessPoint returns new caching access point
-	newAccessPoint auth.NewCachingAccessPoint
+	newAccessPoint auth.NewRemoteProxyCachingAccessPoint
 
 	// cancel function will cancel the
 	cancel context.CancelFunc
@@ -145,10 +145,10 @@ type Config struct {
 	// AccessPoint provides access to a subset of AuthClient of the cluster.
 	// AccessPoint caches values and can still return results during connection
 	// problems.
-	LocalAccessPoint auth.AccessPoint
+	LocalAccessPoint auth.ProxyAccessPoint
 	// NewCachingAccessPoint returns new caching access points
 	// per remote cluster
-	NewCachingAccessPoint auth.NewCachingAccessPoint
+	NewCachingAccessPoint auth.NewRemoteProxyCachingAccessPoint
 	// DirectClusters is a list of clusters accessed directly
 	DirectClusters []DirectCluster
 	// Context is a signalling context
@@ -198,7 +198,7 @@ type Config struct {
 	// NewCachingAccessPointOldProxy is an access point that can be configured
 	// with the old access point policy until all clusters are migrated to 7.0.0
 	// and above.
-	NewCachingAccessPointOldProxy auth.NewCachingAccessPoint
+	NewCachingAccessPointOldProxy auth.NewRemoteProxyCachingAccessPoint
 
 	// LockWatcher is a lock watcher.
 	LockWatcher *services.LockWatcher
@@ -661,6 +661,8 @@ func (s *server) handleHeartbeat(conn net.Conn, sconn *ssh.ServerConn, nch ssh.N
 	// Proxy is dialing back.
 	case types.RoleProxy:
 		s.handleNewCluster(conn, sconn, nch)
+	case types.RoleWindowsDesktop:
+		s.handleNewService(role, conn, sconn, nch, types.WindowsDesktopTunnel)
 	// Unknown role.
 	default:
 		log.Errorf("Unsupported role attempting to connect: %v", val)
@@ -1034,19 +1036,17 @@ func newRemoteSite(srv *server, domainName string, sconn ssh.Conn) (*remoteSite,
 	}
 	remoteSite.remoteClient = clt
 
-	// DELETE IN: 8.0.0
-	//
-	// Check if the cluster that is connecting is a pre-v7 cluster. If it is,
+	// Check if the cluster that is connecting is a pre-v8 cluster. If it is,
 	// don't assume the newer organization of cluster configuration resources
 	// (RFD 28) because older proxy servers will reject that causing the cache
 	// to go into a re-sync loop.
-	var accessPointFunc auth.NewCachingAccessPoint
-	ok, err := isPreV7Cluster(closeContext, sconn)
+	var accessPointFunc auth.NewRemoteProxyCachingAccessPoint
+	ok, err := isPreV8Cluster(closeContext, sconn)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 	if ok {
-		log.Debugf("Pre-v7 cluster connecting, loading old cache policy.")
+		log.Debugf("Pre-v8 cluster connecting, loading old cache policy.")
 		accessPointFunc = srv.Config.NewCachingAccessPointOldProxy
 	} else {
 		accessPointFunc = srv.newAccessPoint
@@ -1076,10 +1076,8 @@ func newRemoteSite(srv *server, domainName string, sconn ssh.Conn) (*remoteSite,
 	return remoteSite, nil
 }
 
-// DELETE IN: 8.0.0.
-//
-// isPreV7Cluster checks if the cluster is older than 7.0.0.
-func isPreV7Cluster(ctx context.Context, conn ssh.Conn) (bool, error) {
+// isPreV8Cluster checks if the cluster is older than 8.0.0.
+func isPreV8Cluster(ctx context.Context, conn ssh.Conn) (bool, error) {
 	version, err := sendVersionRequest(ctx, conn)
 	if err != nil {
 		return false, trace.Wrap(err)
@@ -1089,11 +1087,11 @@ func isPreV7Cluster(ctx context.Context, conn ssh.Conn) (bool, error) {
 	if err != nil {
 		return false, trace.Wrap(err)
 	}
-	minClusterVersion, err := semver.NewVersion(utils.VersionBeforeAlpha("7.0.0"))
+	minClusterVersion, err := semver.NewVersion(utils.VersionBeforeAlpha("8.0.0"))
 	if err != nil {
 		return false, trace.Wrap(err)
 	}
-	// Return true if the version is older than 7.0.0
+	// Return true if the version is older than 8.0.0
 	if remoteClusterVersion.LessThan(*minClusterVersion) {
 		return true, nil
 	}

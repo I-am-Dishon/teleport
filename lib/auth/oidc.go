@@ -768,7 +768,6 @@ func mergeClaims(a jose.Claims, b jose.Claims) (jose.Claims, error) {
 
 // getClaims gets claims from ID token and UserInfo and returns UserInfo claims merged into ID token claims.
 func (a *Server) getClaims(oidcClient *oidc.Client, connector types.OIDCConnector, code string) (jose.Claims, error) {
-	var err error
 
 	oac, err := a.getOAuthClient(oidcClient, connector)
 	if err != nil {
@@ -907,7 +906,6 @@ func (a *Server) getClaims(oidcClient *oidc.Client, connector types.OIDCConnecto
 func (a *Server) getOAuthClient(oidcClient *oidc.Client, connector types.OIDCConnector) (*oauth2.Client, error) {
 
 	oac, err := oidcClient.OAuthClient()
-
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}

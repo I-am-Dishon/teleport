@@ -38,20 +38,24 @@ With every user combination, try to login and signup with invalid second factor,
   - [ ] Adding Users Password Only
   - [ ] Adding Users OTP
   - [ ] Adding Users U2F
+  - [ ] Adding Users WebAuthn
   - [ ] Managing MFA devices
     - [ ] Add an OTP device with `tsh mfa add`
     - [ ] Add a U2F device with `tsh mfa add`
+    - [ ] Verify that the U2F device works under WebAuthn
+    - [ ] Add a WebAuthn device with `tsh mfa add`
     - [ ] List MFA devices with `tsh mfa ls`
     - [ ] Remove an OTP device with `tsh mfa rm`
     - [ ] Remove a U2F device with `tsh mfa rm`
+    - [ ] Remove a WebAuthn device with `tsh mfa rm`
     - [ ] Attempt removing the last MFA device on the user
       - [ ] with `second_factor: on` in `auth_service`, should fail
       - [ ] with `second_factor: optional` in `auth_service`, should succeed
   - [ ] Login Password Only
   - [ ] Login with MFA
-    - [ ] Add 2 OTP and 2 U2F devices with `tsh mfa add`
+    - [ ] Add 2 OTP and 2 WebAuthn devices with `tsh mfa add`
     - [ ] Login via OTP
-    - [ ] Login via U2F
+    - [ ] Login via WebAuthn
   - [ ] Login OIDC
   - [ ] Login SAML
   - [ ] Login GitHub
@@ -60,8 +64,8 @@ With every user combination, try to login and signup with invalid second factor,
 - [ ] Backends
   - [ ] Teleport runs with etcd
   - [ ] Teleport runs with dynamodb
-  - [ ] Teleport runs with boltdb
-  - [ ] Teleport runs with dir
+  - [ ] Teleport runs with SQLite
+  - [ ] Teleport runs with Firestore
 
 - [ ] Session Recording
   - [ ] Session recording can be disabled
@@ -74,11 +78,32 @@ With every user combination, try to login and signup with invalid second factor,
 - [ ] Audit Log
   - [ ] Failed login attempts are recorded
   - [ ] Interactive sessions have the correct Server ID
-    - [ ] Server ID is the ID of the node in regular mode
-    - [ ] Server ID is randomly generated for proxy node
+    - [ ] Server ID is the ID of the node in "session_recording: node" mode
+    - [ ] Server ID is the ID of the proxy in "session_recording: proxy" mode
+
+    Node/Proxy ID may be found at `/var/lib/teleport/host_uuid` in the
+    corresponding machine.
+
+    Node IDs may also be queried via `tctl nodes ls`.
+
   - [ ] Exec commands are recorded
   - [ ] `scp` commands are recorded
   - [ ] Subsystem results are recorded
+
+    Subsystem testing may be achieved using both
+    [Recording Proxy mode](
+    https://goteleport.com/teleport/docs/architecture/proxy/#recording-proxy-mode)
+    and
+    [OpenSSH integration](
+    https://goteleport.com/docs/server-access/guides/openssh/).
+
+    Assuming the proxy is `proxy.example.com:3023` and `node1` is a node running
+    OpenSSH/sshd, you may use the following command to trigger a subsystem audit
+    log:
+
+    ```shell
+    sftp -o "ProxyCommand ssh -o 'ForwardAgent yes' -p 3023 %r@proxy.example.com -s proxy:%h:%p" root@node1
+    ```
 
 - [ ] Interact with a cluster using `tsh`
 
@@ -183,6 +208,10 @@ Minikube is the only caveat - it's not reachable publicly so don't run a proxy t
 
 * [ ] Perform trusted clusters, Web and SSH sanity check with all teleport components deployed in FIPS mode.
 
+### ACME
+
+- [ ] Teleport can fetch TLS certificate automatically using ACME protocol.
+
 ### Migrations
 
 * [ ] Migrate trusted clusters from 2.4.0 to 2.5.0
@@ -250,7 +279,7 @@ tsh --proxy=proxy.example.com --user=<username> --insecure ssh --cluster=foo.com
 ## WEB UI
 
 ## Main
-For main, test with admin role that has access to all resources.
+For main, test with a role that has access to all resources.
 
 #### Top Nav
 - [ ] Verify that cluster selector displays all (root + leaf) clusters
@@ -505,6 +534,7 @@ With the previous role you created from `Strategy Reason`, change `request_acces
 - [ ] Verify that invite works with 2FA disabled
 - [ ] Verify that invite works with OTP enabled
 - [ ] Verify that invite works with U2F enabled
+- [ ] Verify that invite works with WebAuthn enabled
 - [ ] Verify that error message is shown if an invite is expired/invalid
 
 ## Login Form
@@ -515,36 +545,36 @@ With the previous role you created from `Strategy Reason`, change `request_acces
 - [ ] Verify that changing passwords works for OTP enabled
 - [ ] Verify that login works with U2F enabled
 - [ ] Verify that changing passwords works for U2F enabled
+- [ ] Verify that login works with WebAuthn enabled
+- [ ] Verify that changing passwords works for WebAuthn enabled
 - [ ] Verify that login works for Github/SAML/OIDC
 - [ ] Verify that account is locked after several unsuccessful attempts
 - [ ] Verify that redirect to original URL works after successful login
 
 ## Multi-factor Authentication (mfa)
 Create/modify `teleport.yaml` and set the following authentication settings under `auth_service`
-```
+
+```yaml
 authentication:
   type: local
   second_factor: optional
   require_session_mfa: yes
-  u2f:
-    app_id: https://example.com:443
-    facets:
-    - https://example.com:443
-    - https://example.com
-    - example.com:443
-    - example.com
+  webauthn:
+    rp_id: example.com
 ```
+
 #### MFA create, login, password reset
 - [ ] Verify when creating a user, and setting password, required 2nd factor is `totp` (TODO: temporary hack, ideally want to allow user to select)
-- [ ] Verify at login page, there is a mfa dropdown menu (none, u2f, otp), and can login with `otp`
+- [ ] Verify at login page, there is a mfa dropdown menu (none, webauthn, otp), and can login with `otp`
+- [ ] Verify at login page that the dropdown changes to (none, u2f, otp) if the second_factor is changed to `u2f`
 - [ ] Verify at reset password page, there is the same dropdown to select your mfa, and can reset with `otp`
 
 #### MFA require auth
-Through the CLI, `tsh login` and register a u2f key with `tsh mfa add` (not supported in UI yet).
+Through the CLI, `tsh login` and register a WebAuthn key with `tsh mfa add` (not supported in UI yet).
 
 Using the same user as above:
-- [ ] Verify logging in with registered u2f key works
-- [ ] Verify connecting to a ssh node prompts you to tap your registered u2f key
+- [ ] Verify logging in with registered WebAuthn key works
+- [ ] Verify connecting to a ssh node prompts you to tap your registered WebAuthn key
 - [ ] Verify in the web terminal, you can scp upload/download files
 
 ## RBAC
@@ -704,6 +734,13 @@ and non interactive tsh bench loads.
 - [ ] Verify JWT using [verify-jwt.go](https://github.com/gravitational/teleport/blob/master/examples/jwt/verify-jwt.go).
 - [ ] Verify RBAC.
 - [ ] Verify [CLI access](https://goteleport.com/docs/application-access/guides/api-access/) with `tsh app login`.
+- [ ] Verify AWS console access.
+  - [ ] Can log into AWS web console through the web UI.
+  - [ ] Can interact with AWS using `tsh aws` commands.
+- [ ] Verify dynamic registration.
+  - [ ] Can register a new app using `tctl create`.
+  - [ ] Can update registered app using `tctl create -f`.
+  - [ ] Can delete registered app using `tctl rm`.
 - [ ] Test Applications screen in the web UI (tab is located on left side nav on dashboard):
   - [ ] Verify that all apps registered are shown
   - [ ] Verify that clicking on the app icon takes you to another tab
@@ -714,17 +751,23 @@ and non interactive tsh bench loads.
 - [ ] Connect to a database within a local cluster.
   - [ ] Self-hosted Postgres.
   - [ ] Self-hosted MySQL.
+  - [ ] Self-hosted MongoDB.
+  - [ ] Self-hosted CockroachDB.
   - [ ] AWS Aurora Postgres.
   - [ ] AWS Aurora MySQL.
-  - [ ] AWS Redshift Postgres.
+  - [ ] AWS Redshift.
   - [ ] GCP Cloud SQL Postgres.
+  - [ ] GCP Cloud SQL MySQL.
 - [ ] Connect to a database within a remote cluster via a trusted cluster.
   - [ ] Self-hosted Postgres.
   - [ ] Self-hosted MySQL.
+  - [ ] Self-hosted MongoDB.
+  - [ ] Self-hosted CockroachDB.
   - [ ] AWS Aurora Postgres.
   - [ ] AWS Aurora MySQL.
-  - [ ] AWS Redshift Postgres.
+  - [ ] AWS Redshift.
   - [ ] GCP Cloud SQL Postgres.
+  - [ ] GCP Cloud SQL MySQL.
 - [ ] Verify audit events.
   - [ ] `db.session.start` is emitted when you connect.
   - [ ] `db.session.end` is emitted when you disconnect.
@@ -733,7 +776,17 @@ and non interactive tsh bench loads.
   - [ ] `tsh db ls` shows only databases matching role's `db_labels`.
   - [ ] Can only connect as users from `db_users`.
   - [ ] _(Postgres only)_ Can only connect to databases from `db_names`.
-  - [ ] `db.session.start` is emitted when connection attempt is denied.
+    - [ ] `db.session.start` is emitted when connection attempt is denied.
+  - [ ] _(MongoDB only)_ Can only execute commands in databases from `db_names`.
+    - [ ] `db.session.query` is emitted when command fails due to permissions.
+  - [ ] Can configure per-session MFA.
+    - [ ] MFA tap is required on each `tsh db connect`.
+- [ ] Verify dynamic registration.
+  - [ ] Can register a new database using `tctl create`.
+  - [ ] Can update registered database using `tctl create -f`.
+  - [ ] Can delete registered database using `tctl rm`.
+- [ ] Verify discovery.
+  - [ ] Can detect and register RDS instances and Aurora clusters.
 - [ ] Test Databases screen in the web UI (tab is located on left side nav on dashboard):
   - [ ] Verify that all dbs registered are shown with correct `name`, `description`, `type`, and `labels`
   - [ ] Verify that clicking on a rows connect button renders a dialogue on manual instructions with `Step 2` login value matching the rows `name` column

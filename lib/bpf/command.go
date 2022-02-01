@@ -1,3 +1,4 @@
+//go:build bpf && !386
 // +build bpf,!386
 
 /*
@@ -29,9 +30,6 @@ import (
 
 	_ "embed"
 )
-
-//go:embed bytecode/command.bpf.o
-var commandBPF []byte
 
 var (
 	lostCommandEvents = prometheus.NewCounter(
@@ -87,6 +85,11 @@ func startExec(bufferSize int) (*exec, error) {
 	}
 
 	e := &exec{}
+
+	commandBPF, err := embedFS.ReadFile("bytecode/command.bpf.o")
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
 
 	e.module, err = libbpfgo.NewModuleFromBuffer(commandBPF, "command")
 	if err != nil {

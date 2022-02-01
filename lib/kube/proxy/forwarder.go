@@ -48,6 +48,7 @@ import (
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/srv"
+	"github.com/gravitational/teleport/lib/srv/alpnproxy"
 	"github.com/gravitational/teleport/lib/sshca"
 	"github.com/gravitational/teleport/lib/utils"
 
@@ -97,7 +98,7 @@ type ForwarderConfig struct {
 	// AuthClient is a auth server client.
 	AuthClient auth.ClientI
 	// CachingAuthClient is a caching auth server client for read-only access.
-	CachingAuthClient auth.AccessPoint
+	CachingAuthClient auth.ReadKubernetesAccessPoint
 	// StreamEmitter is used to create audit streams
 	// and emit audit events
 	StreamEmitter events.StreamEmitter
@@ -135,11 +136,11 @@ type ForwarderConfig struct {
 	DynamicLabels *labels.Dynamic
 	// LockWatcher is a lock watcher.
 	LockWatcher *services.LockWatcher
-	// PublicAddr is the address that can be used to reach the kube cluster
-	PublicAddr string
 	// CheckImpersonationPermissions is an optional override of the default
 	// impersonation permissions check, for use in testing
 	CheckImpersonationPermissions ImpersonationPermissionsChecker
+	// PublicAddr is the address that can be used to reach the kube cluster
+	PublicAddr string
 }
 
 // CheckAndSetDefaults checks and sets default values
@@ -646,7 +647,11 @@ func (f *Forwarder) authorize(ctx context.Context, actx *authContext) error {
 			if ks.Name != actx.kubeCluster {
 				continue
 			}
-			if err := actx.Checker.CheckAccessToKubernetes(s.GetNamespace(), ks, mfaParams); err != nil {
+			k8sV3, err := types.NewKubernetesClusterV3FromLegacyCluster(s.GetNamespace(), ks)
+			if err != nil {
+				return trace.Wrap(err)
+			}
+			if err := actx.Checker.CheckAccess(k8sV3, mfaParams); err != nil {
 				return clusterNotFound
 			}
 			return nil
@@ -1106,8 +1111,8 @@ func (f *Forwarder) setupForwardingHeaders(sess *clusterSession, req *http.Reque
 	req.RequestURI = req.URL.Path + "?" + req.URL.RawQuery
 
 	// We only have a direct host to provide when using local creds.
-	// Otherwise, use teleport.cluster.local to pass TLS handshake.
-	req.URL.Host = constants.APIDomain
+	// Otherwise, use kube.teleport.cluster.local to pass TLS handshake and leverage TLS Routing.
+	req.URL.Host = fmt.Sprintf("%s.%s", alpnproxy.KubeSNIPrefix, constants.APIDomain)
 	if sess.creds != nil {
 		req.URL.Host = sess.creds.targetAddr
 	}

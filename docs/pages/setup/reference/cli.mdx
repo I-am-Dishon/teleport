@@ -604,7 +604,7 @@ $ tsh mfa add
 ```code
 $ tsh mfa add
 
-# Choose device type [TOTP, U2F]: u2f
+# Choose device type [TOTP, WEBAUTHN]: webauthn
 # Enter device name: desktop yubikey
 # Tap any *registered* security key
 # Tap your *new* security key
@@ -614,7 +614,7 @@ $ tsh mfa add
 ```code
 $ tsh mfa add
 
-# Choose device type [TOTP, U2F]: totp
+# Choose device type [TOTP, WEBAUTHN]: totp
 # Enter device name: android
 # Tap any *registered* security key
 # Open your TOTP app and create a new manual entry with these fields:
@@ -1262,4 +1262,38 @@ Print cluster version:
 
 ```code
 tctl version
+```
+
+## Experimental features
+
+### tctl access ls
+
+Displays user accesses to SSH nodes
+
+```bash
+tctl access ls [--user <user> | --login <login> | --node <hostname>][<flags>]
+```
+
+#### Flags
+
+| Name | Default Value(s) | Allowed Value(s) | Description |
+| - | - | - | - |
+| `--user` | none | existing user | Teleport user name |
+| `--login` | none | user login | Teleport user login |
+| `--node` | none | existing hostname | Teleport node hostname |
+| `--namespace` | default | existing namespace | Teleport namespace |
+
+#### Examples
+
+```bash
+# Get all user accesses over all nodes
+tctl access ls
+# Get accesses for user 'joe'
+tctl access ls --user joe
+# Get accesses for node 'prod'
+tctl access ls --node prod
+# Get accesses for login 'root'
+tctl access ls --login root
+# Get accesses for user 'joe', node 'prod', and login 'root'
+tctl access ls --user joe --login root --node prod
 ```

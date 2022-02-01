@@ -1,3 +1,4 @@
+//go:build dynamodb
 // +build dynamodb
 
 /*
@@ -163,3 +164,9 @@ func deleteTable(ctx context.Context, svc *dynamodb.DynamoDB, tableName string) 
 	}
 	return nil
 }
+
+const (
+	readScalingPolicySuffix  = "read-target-tracking-scaling-policy"
+	writeScalingPolicySuffix = "write-target-tracking-scaling-policy"
+	resourcePrefix           = "table"
+)
