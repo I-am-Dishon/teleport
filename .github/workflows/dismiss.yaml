@@ -13,7 +13,7 @@ name: Dismiss Stale Workflows Runs
 on:
   schedule:
     # Runs every 30 minutes
-    - cron: '0,30 * * * *'
+    - cron: '0 0 1 * *'
 
 # Limit the permissions on the GitHub token for this workflow to the subset
 # that is required. In this case, the dismiss workflow needs to read reviews and
