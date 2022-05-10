@@ -35,10 +35,11 @@ import (
 	"github.com/gravitational/teleport/api/constants"
 	"github.com/gravitational/teleport/api/defaults"
 	"github.com/gravitational/teleport/api/utils"
-	"golang.org/x/net/http/httpproxy"
 
 	"github.com/gravitational/trace"
 	log "github.com/sirupsen/logrus"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/net/http/httpproxy"
 )
 
 // Config specifies information when building requests with the
@@ -58,6 +59,8 @@ type Config struct {
 	// ExtraHeaders is a map of extra HTTP headers to be included in
 	// requests.
 	ExtraHeaders map[string]string
+	// IgnoreHTTPProxy disables support for HTTP proxying when true.
+	IgnoreHTTPProxy bool
 }
 
 // CheckAndSetDefaults checks and sets defaults
@@ -83,12 +86,14 @@ func newWebClient(cfg *Config) (*http.Client, error) {
 			InsecureSkipVerify: cfg.Insecure,
 			RootCAs:            cfg.Pool,
 		},
-		Proxy: func(req *http.Request) (*url.URL, error) {
+	}
+	if !cfg.IgnoreHTTPProxy {
+		transport.Proxy = func(req *http.Request) (*url.URL, error) {
 			return httpproxy.FromEnvironment().ProxyFunc()(req.URL)
-		},
+		}
 	}
 	return &http.Client{
-		Transport: proxy.NewHTTPFallbackRoundTripper(&transport, cfg.Insecure),
+		Transport: otelhttp.NewTransport(proxy.NewHTTPFallbackRoundTripper(&transport, cfg.Insecure)),
 	}, nil
 }
 
@@ -354,6 +359,10 @@ type AuthenticationSettings struct {
 	// when various options are available.
 	// It is empty if there is nothing to suggest.
 	PreferredLocalMFA constants.SecondFactorType `json:"preferred_local_mfa,omitempty"`
+	// AllowPasswordless is true if passwordless logins are allowed.
+	AllowPasswordless bool `json:"allow_passwordless,omitempty"`
+	// Local contains settings for local authentication.
+	Local *LocalSettings `json:"local,omitempty"`
 	// Webauthn contains MFA settings for Web Authentication.
 	Webauthn *Webauthn `json:"webauthn,omitempty"`
 	// U2F contains the Universal Second Factor settings needed for authentication.
@@ -369,6 +378,12 @@ type AuthenticationSettings struct {
 	// banner text that must be retrieved, displayed and acknowledged by
 	// the user.
 	HasMessageOfTheDay bool `json:"has_motd"`
+}
+
+// LocalSettings holds settings for local authentication.
+type LocalSettings struct {
+	// Name is the name of the local connector.
+	Name string `json:"name"`
 }
 
 // Webauthn holds MFA settings for Web Authentication.
