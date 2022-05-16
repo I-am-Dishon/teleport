@@ -487,7 +487,13 @@ func init() {
 		}
 		return githubConnector, nil
 	})
-
+	RegisterResourceUnmarshaler(types.KindOIDCConnector, func(b []byte, opts ...MarshalOption) (types.Resource, error) {
+		rsc, err := UnmarshalOIDCConnector(b) // XXX: Does not support marshal options.
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		return rsc, nil
+	})
 	RegisterResourceMarshaler(types.KindRole, func(resource types.Resource, opts ...MarshalOption) ([]byte, error) {
 		role, ok := resource.(types.Role)
 		if !ok {

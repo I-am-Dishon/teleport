@@ -139,7 +139,7 @@ type defaultModules struct{}
 
 // BuildType returns build type (OSS or Enterprise)
 func (p *defaultModules) BuildType() string {
-	return BuildOSS
+	return BuildEnterprise
 }
 
 // PrintVersion prints the Teleport version.
@@ -154,7 +154,11 @@ func (p *defaultModules) Features() Features {
 		DB:                true,
 		App:               true,
 		Desktop:           true,
-		ModeratedSessions: false, // moderated sessions is supported in enterprise only
+		OIDC:			   true,
+		SAML:              true,
+		AccessControls:    true,
+		AdvancedAccessWorkflows: true,
+		ModeratedSessions: true, // moderated sessions is supported in enterprise only
 	}
 }
 
