@@ -33,6 +33,8 @@ import (
 
 // TestHeartbeatKeepAlive tests keep alive cycle used for nodes and apps.
 func TestHeartbeatKeepAlive(t *testing.T) {
+	t.Parallel()
+
 	var tests = []struct {
 		name       string
 		mode       HeartbeatMode
@@ -60,15 +62,14 @@ func TestHeartbeatKeepAlive(t *testing.T) {
 			name: "keep alive app server",
 			mode: HeartbeatModeApp,
 			makeServer: func() types.Resource {
-				return &types.ServerV2{
+				return &types.AppServerV3{
 					Kind:    types.KindAppServer,
-					Version: types.V2,
+					Version: types.V3,
 					Metadata: types.Metadata{
 						Namespace: apidefaults.Namespace,
 						Name:      "1",
 					},
-					Spec: types.ServerSpecV2{
-						Addr:     "127.0.0.1:1234",
+					Spec: types.AppServerSpecV3{
 						Hostname: "2",
 					},
 				}
@@ -97,16 +98,22 @@ func TestHeartbeatKeepAlive(t *testing.T) {
 			name: "keep alive kubernetes server",
 			mode: HeartbeatModeKube,
 			makeServer: func() types.Resource {
-				return &types.ServerV2{
+				return &types.KubernetesServerV3{
 					Kind:    types.KindKubeService,
 					Version: types.V2,
 					Metadata: types.Metadata{
 						Namespace: apidefaults.Namespace,
 						Name:      "1",
 					},
-					Spec: types.ServerSpecV2{
-						Addr:     "127.0.0.1:1234",
-						Hostname: "2",
+					Spec: types.KubernetesServerSpecV3{
+						Hostname: "127.0.0.1:1234",
+						Cluster: &types.KubernetesClusterV3{
+							Metadata: types.Metadata{
+								Namespace: apidefaults.Namespace,
+								Name:      "1",
+							},
+							Spec: types.KubernetesClusterSpecV3{},
+						},
 					},
 				}
 			},
@@ -211,6 +218,7 @@ func TestHeartbeatKeepAlive(t *testing.T) {
 // TestHeartbeatAnnounce tests announce cycles used for proxies and auth servers
 func TestHeartbeatAnnounce(t *testing.T) {
 	t.Parallel()
+
 	tests := []struct {
 		mode HeartbeatMode
 		kind string
@@ -325,14 +333,6 @@ type fakeAnnouncer struct {
 	keepAlivesC chan<- types.KeepAlive
 }
 
-func (f *fakeAnnouncer) UpsertAppServer(ctx context.Context, s types.Server) (*types.KeepAlive, error) {
-	f.upsertCalls[HeartbeatModeApp]++
-	if f.err != nil {
-		return nil, f.err
-	}
-	return &types.KeepAlive{}, nil
-}
-
 func (f *fakeAnnouncer) UpsertApplicationServer(ctx context.Context, s types.AppServer) (*types.KeepAlive, error) {
 	f.upsertCalls[HeartbeatModeApp]++
 	if f.err != nil {
@@ -380,6 +380,14 @@ func (f *fakeAnnouncer) UpsertKubeServiceV2(ctx context.Context, s types.Server)
 	return &types.KeepAlive{}, f.err
 }
 
+func (f *fakeAnnouncer) UpsertKubernetesServer(ctx context.Context, s types.KubeServer) (*types.KeepAlive, error) {
+	f.upsertCalls[HeartbeatModeKube]++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &types.KeepAlive{}, f.err
+}
+
 func (f *fakeAnnouncer) UpsertWindowsDesktopService(ctx context.Context, s types.WindowsDesktopService) (*types.KeepAlive, error) {
 	f.upsertCalls[HeartbeatModeWindowsDesktopService]++
 	if f.err != nil {
@@ -407,7 +415,7 @@ func (f *fakeAnnouncer) KeepAlives() chan<- types.KeepAlive {
 	return f.keepAlivesC
 }
 
-// Done returns the channel signalling the closure
+// Done returns the channel signaling the closure
 func (f *fakeAnnouncer) Done() <-chan struct{} {
 	return f.ctx.Done()
 }

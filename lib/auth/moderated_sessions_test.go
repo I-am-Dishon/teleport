@@ -20,52 +20,62 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gravitational/teleport/api/client/proto"
+	"github.com/jonboulle/clockwork"
+	"github.com/stretchr/testify/require"
+
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/lib/backend/memory"
 	"github.com/gravitational/teleport/lib/modules"
 	"github.com/gravitational/teleport/lib/services/local"
-	"github.com/stretchr/testify/require"
 )
 
 // TestUnmoderatedSessionsAllowed tests that we allow creating unmoderated sessions even if the
-// moderated sessions feature is disabled via modules.
+// license does not support the moderated sessions feature.
 func TestUnmoderatedSessionsAllowed(t *testing.T) {
-	modules.SetTestModules(t, &modules.TestModules{TestFeatures: modules.Features{
-		ModeratedSessions: false, // Explicily turn off moderated sessions.
-	}})
+	// Use OSS License (which doesn't support moderated sessions).
+	modules.SetTestModules(t, &modules.TestModules{TestBuildType: modules.BuildOSS})
+
+	srv := &Server{
+		clock:    clockwork.NewRealClock(),
+		Services: &Services{},
+	}
 
 	bk, err := memory.New(memory.Config{})
 	require.NoError(t, err)
 
-	srv, err := local.NewSessionTrackerService(bk)
+	srv.Services.SessionTrackerService, err = local.NewSessionTrackerService(bk)
 	require.NoError(t, err)
 
-	tracker, err := srv.CreateSessionTracker(context.Background(), &proto.CreateSessionTrackerRequest{
-		ID:        "foo",
-		Initiator: &types.Participant{},
+	tracker, err := types.NewSessionTracker(types.SessionTrackerSpecV1{
+		SessionID: "foo",
 	})
+	require.NoError(t, err)
+	tracker.AddParticipant(types.Participant{})
 
+	_, err = srv.CreateSessionTracker(context.Background(), tracker)
 	require.NoError(t, err)
 	require.NotNil(t, tracker)
 }
 
-// TestModeratedSessionsDisabled makes sure moderated sessions can be disabled via modules.
+// TestModeratedSessionsDisabled makes sure moderated sessions are disabled when the license does not support it.
 // Since moderated sessions require trackers, we mediate this in the tracker creation function.
 func TestModeratedSessionsDisabled(t *testing.T) {
-	modules.SetTestModules(t, &modules.TestModules{TestFeatures: modules.Features{
-		ModeratedSessions: false, // Explicily turn off moderated sessions.
-	}})
+	// Use OSS License (which doesn't support moderated sessions).
+	modules.SetTestModules(t, &modules.TestModules{TestBuildType: modules.BuildOSS})
+
+	srv := &Server{
+		clock:    clockwork.NewRealClock(),
+		Services: &Services{},
+	}
 
 	bk, err := memory.New(memory.Config{})
 	require.NoError(t, err)
 
-	srv, err := local.NewSessionTrackerService(bk)
+	srv.Services.SessionTrackerService, err = local.NewSessionTrackerService(bk)
 	require.NoError(t, err)
 
-	tracker, err := srv.CreateSessionTracker(context.Background(), &proto.CreateSessionTrackerRequest{
-		ID:        "foo",
-		Initiator: &types.Participant{},
+	tracker, err := types.NewSessionTracker(types.SessionTrackerSpecV1{
+		SessionID: "foo",
 		HostPolicies: []*types.SessionTrackerPolicySet{
 			{
 				Name:    "foo",
@@ -78,28 +88,34 @@ func TestModeratedSessionsDisabled(t *testing.T) {
 			},
 		},
 	})
+	require.NoError(t, err)
+	tracker.AddParticipant(types.Participant{})
 
+	tracker, err = srv.CreateSessionTracker(context.Background(), tracker)
 	require.Error(t, err)
 	require.Nil(t, tracker)
-	require.Contains(t, err.Error(), "this Teleport cluster is not licensed for moderated sessions, please contact the cluster administrator")
+	require.ErrorIs(t, err, ErrRequiresEnterprise)
 }
 
 // TestModeratedSessionsEnabled verifies that we can create session trackers with moderation
-// requirements when the feature is enabled.
+// requirements when the license supports it.
 func TestModeratedSesssionsEnabled(t *testing.T) {
-	modules.SetTestModules(t, &modules.TestModules{TestFeatures: modules.Features{
-		ModeratedSessions: true,
-	}})
+	// Use Enterprise License (which supports moderated sessions).
+	modules.SetTestModules(t, &modules.TestModules{TestBuildType: modules.BuildEnterprise})
+
+	srv := &Server{
+		clock:    clockwork.NewRealClock(),
+		Services: &Services{},
+	}
 
 	bk, err := memory.New(memory.Config{})
 	require.NoError(t, err)
 
-	srv, err := local.NewSessionTrackerService(bk)
+	srv.Services.SessionTrackerService, err = local.NewSessionTrackerService(bk)
 	require.NoError(t, err)
 
-	tracker, err := srv.CreateSessionTracker(context.Background(), &proto.CreateSessionTrackerRequest{
-		ID:        "foo",
-		Initiator: &types.Participant{},
+	tracker, err := types.NewSessionTracker(types.SessionTrackerSpecV1{
+		SessionID: "foo",
 		HostPolicies: []*types.SessionTrackerPolicySet{
 			{
 				Name:    "foo",
@@ -112,7 +128,10 @@ func TestModeratedSesssionsEnabled(t *testing.T) {
 			},
 		},
 	})
+	require.NoError(t, err)
+	tracker.AddParticipant(types.Participant{})
 
+	_, err = srv.CreateSessionTracker(context.Background(), tracker)
 	require.NoError(t, err)
 	require.NotNil(t, tracker)
 }

@@ -23,7 +23,8 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"sync/atomic"
+	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -33,8 +34,9 @@ import (
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/api/types/wrappers"
 	apiutils "github.com/gravitational/teleport/api/utils"
+	"github.com/gravitational/teleport/api/utils/keys"
+	"github.com/gravitational/teleport/lib/modules"
 	"github.com/gravitational/teleport/lib/services"
-	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
@@ -48,69 +50,76 @@ var log = logrus.WithFields(logrus.Fields{
 })
 
 // precomputedKeys is a queue of cached keys ready for usage.
-var precomputedKeys = make(chan keyPair, 25)
+var precomputedKeys = make(chan *rsa.PrivateKey, 25)
 
-// precomputeTaskStarted is used to start the background task that precomputes key pairs.
-// This may only ever be accessed atomically.
-var precomputeTaskStarted int32
+// startPrecomputeOnce is used to start the background task that precomputes key pairs.
+var startPrecomputeOnce sync.Once
 
-func generateKeyPairImpl() ([]byte, []byte, error) {
-	priv, err := rsa.GenerateKey(rand.Reader, constants.RSAKeySize)
-	if err != nil {
-		return nil, nil, err
-	}
-	privDer := x509.MarshalPKCS1PrivateKey(priv)
-	privBlock := pem.Block{
-		Type:    "RSA PRIVATE KEY",
-		Headers: nil,
-		Bytes:   privDer,
-	}
-	privPem := pem.EncodeToMemory(&privBlock)
-
-	pub, err := ssh.NewPublicKey(&priv.PublicKey)
-	if err != nil {
-		return nil, nil, err
-	}
-	pubBytes := ssh.MarshalAuthorizedKey(pub)
-	return privPem, pubBytes, nil
-}
-
-func replenishKeys() {
-	// Mark the task as stopped.
-	defer atomic.StoreInt32(&precomputeTaskStarted, 0)
-
-	for {
-		priv, pub, err := generateKeyPairImpl()
-		if err != nil {
-			log.Errorf("Failed to generate key pair: %v", err)
-			return
-		}
-
-		precomputedKeys <- keyPair{priv, pub}
-	}
-}
-
-// GenerateKeyPair returns fresh priv/pub keypair, takes about 300ms to execute in a worst case.
-// This will in most cases pull from a precomputed cache of ready to use keys.
+// GenerateKeyPair generates a new RSA key pair.
 func GenerateKeyPair() ([]byte, []byte, error) {
-	// Start the background task to replenish the queue of precomputed keys.
-	// This is only started once this function is called to avoid starting the task
-	// just by pulling in this package.
-	if atomic.SwapInt32(&precomputeTaskStarted, 1) == 0 {
-		go replenishKeys()
+	priv, err := GeneratePrivateKey()
+	if err != nil {
+		return nil, nil, trace.Wrap(err)
+	}
+	return priv.PrivateKeyPEM(), priv.MarshalSSHPublicKey(), nil
+}
+
+// GeneratePrivateKey generates a new RSA private key.
+func GeneratePrivateKey() (*keys.PrivateKey, error) {
+	rsaKey, err := getOrGenerateRSAPrivateKey()
+	if err != nil {
+		return nil, trace.Wrap(err)
 	}
 
+	// We encode the private key in PKCS #1, ASN.1 DER form
+	// instead of PKCS #8 to maintain compatibility with some
+	// third party clients.
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:    keys.PKCS1PrivateKeyType,
+		Headers: nil,
+		Bytes:   x509.MarshalPKCS1PrivateKey(rsaKey),
+	})
+
+	return keys.NewPrivateKey(rsaKey, keyPEM)
+}
+
+func getOrGenerateRSAPrivateKey() (*rsa.PrivateKey, error) {
 	select {
 	case k := <-precomputedKeys:
-		return k.privPem, k.pubBytes, nil
+		return k, nil
 	default:
-		return generateKeyPairImpl()
+		rsaKeyPair, err := rsa.GenerateKey(rand.Reader, constants.RSAKeySize)
+		if err != nil {
+			return nil, err
+		}
+		return rsaKeyPair, nil
 	}
 }
 
-type keyPair struct {
-	privPem  []byte
-	pubBytes []byte
+func generateRSAPrivateKey() (*rsa.PrivateKey, error) {
+	return rsa.GenerateKey(rand.Reader, constants.RSAKeySize)
+}
+
+func precomputeKeys() {
+	const backoff = time.Second * 30
+	for {
+		rsaPrivateKey, err := generateRSAPrivateKey()
+		if err != nil {
+			log.WithError(err).Errorf("Failed to precompute key pair, retrying in %s (this might be a bug).", backoff)
+			time.Sleep(backoff)
+		}
+
+		precomputedKeys <- rsaPrivateKey
+	}
+}
+
+// PrecomputeKeys sets this package into a mode where a small backlog of keys are
+// computed in advance.  This should only be enabled if large spikes in key computation
+// are expected (e.g. in auth/proxy services).  Safe to double-call.
+func PrecomputeKeys() {
+	startPrecomputeOnce.Do(func() {
+		go precomputeKeys()
+	})
 }
 
 // keygen is a key generator that precomputes keys to provide quick access to
@@ -177,8 +186,6 @@ func (k *Keygen) GenerateHostCertWithoutValidation(c services.HostCertParams) ([
 		return nil, trace.Wrap(err)
 	}
 
-	signer := sshutils.AlgSigner(c.CASigner, c.CASigningAlg)
-
 	// Build a valid list of principals from the HostID and NodeName and then
 	// add in any additional principals passed in.
 	principals := BuildPrincipals(c.HostID, c.NodeName, c.ClusterName, types.SystemRoles{c.Role})
@@ -207,7 +214,7 @@ func (k *Keygen) GenerateHostCertWithoutValidation(c services.HostCertParams) ([
 	cert.Permissions.Extensions[utils.CertExtensionAuthority] = c.ClusterName
 
 	// sign host certificate with private signing key of certificate authority
-	if err := cert.SignCert(rand.Reader, signer); err != nil {
+	if err := cert.SignCert(rand.Reader, c.CASigner); err != nil {
 		return nil, trace.Wrap(err)
 	}
 
@@ -225,8 +232,13 @@ func (k *Keygen) GenerateUserCert(c services.UserCertParams) ([]byte, error) {
 	return k.GenerateUserCertWithoutValidation(c)
 }
 
+// sourceAddress is a critical option that defines IP addresses (in CIDR notation)
+// from which this certificate is accepted for authentication.
+// See: https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.certkeys?annotate=HEAD.
+const sourceAddress = "source-address"
+
 // GenerateUserCertWithoutValidation generates a user certificate with the
-// passed in parameters without validating them. For use in tests only.
+// passed in parameters without validating them.
 func (k *Keygen) GenerateUserCertWithoutValidation(c services.UserCertParams) ([]byte, error) {
 	pubKey, _, _, _, err := ssh.ParseAuthorizedKey(c.PublicUserKey)
 	if err != nil {
@@ -277,6 +289,31 @@ func (k *Keygen) GenerateUserCertWithoutValidation(c services.UserCertParams) ([
 	if c.Generation > 0 {
 		cert.Permissions.Extensions[teleport.CertExtensionGeneration] = fmt.Sprint(c.Generation)
 	}
+	if c.AllowedResourceIDs != "" {
+		cert.Permissions.Extensions[teleport.CertExtensionAllowedResources] = c.AllowedResourceIDs
+	}
+	if c.ConnectionDiagnosticID != "" {
+		cert.Permissions.Extensions[teleport.CertExtensionConnectionDiagnosticID] = c.ConnectionDiagnosticID
+	}
+	if c.PrivateKeyPolicy != "" {
+		cert.Permissions.Extensions[teleport.CertExtensionPrivateKeyPolicy] = string(c.PrivateKeyPolicy)
+	}
+
+	if c.SourceIP != "" {
+		if modules.GetModules().BuildType() != modules.BuildEnterprise {
+			return nil, trace.AccessDenied("source IP pinning is only supported in Teleport Enterprise")
+		}
+		if cert.CriticalOptions == nil {
+			cert.CriticalOptions = make(map[string]string)
+		}
+		//IPv4, all bits matter
+		ip := c.SourceIP + "/32"
+		if strings.Contains(c.SourceIP, ":") {
+			//IPv6
+			ip = c.SourceIP + "/128"
+		}
+		cert.CriticalOptions[sourceAddress] = ip
+	}
 
 	for _, extension := range c.CertificateExtensions {
 		// TODO(lxea): update behavior when non ssh, non extensions are supported.
@@ -318,8 +355,7 @@ func (k *Keygen) GenerateUserCertWithoutValidation(c services.UserCertParams) ([
 		}
 	}
 
-	signer := sshutils.AlgSigner(c.CASigner, c.CASigningAlg)
-	if err := cert.SignCert(rand.Reader, signer); err != nil {
+	if err := cert.SignCert(rand.Reader, c.CASigner); err != nil {
 		return nil, trace.Wrap(err)
 	}
 	return ssh.MarshalAuthorizedKey(cert), nil
@@ -328,8 +364,8 @@ func (k *Keygen) GenerateUserCertWithoutValidation(c services.UserCertParams) ([
 // BuildPrincipals takes a hostID, nodeName, clusterName, and role and builds a list of
 // principals to insert into a certificate. This function is backward compatible with
 // older clients which means:
-//    * If RoleAdmin is in the list of roles, only a single principal is returned: hostID
-//    * If nodename is empty, it is not included in the list of principals.
+//   - If RoleAdmin is in the list of roles, only a single principal is returned: hostID
+//   - If nodename is empty, it is not included in the list of principals.
 func BuildPrincipals(hostID string, nodeName string, clusterName string, roles types.SystemRoles) []string {
 	// TODO(russjones): This should probably be clusterName, but we need to
 	// verify changing this won't break older clients.

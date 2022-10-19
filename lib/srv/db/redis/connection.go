@@ -62,13 +62,22 @@ type ConnectionOptions struct {
 // connection options like address and connection mode. If port is skipped
 // default Redis 6379 is used.
 // Correct inputs:
-// 	rediss://redis.example.com:6379?mode=cluster
-// 	redis://redis.example.com:6379
-// 	redis.example.com:6379
+//
+//	rediss://redis.example.com:6379?mode=cluster
+//	redis://redis.example.com:6379
+//	redis.example.com:6379
 //
 // Incorrect input:
+//
 //	redis.example.com:6379?mode=cluster
 func ParseRedisAddress(addr string) (*ConnectionOptions, error) {
+	// Default to the single mode.
+	return ParseRedisAddressWithDefaultMode(addr, Standalone)
+}
+
+// ParseRedisAddressWithDefaultMode parses a Redis connection string and uses
+// the provided default mode if mode is not specified in the address.
+func ParseRedisAddressWithDefaultMode(addr string, defaultMode ConnectionMode) (*ConnectionOptions, error) {
 	if addr == "" {
 		return nil, trace.BadParameter("Redis address is empty")
 	}
@@ -124,8 +133,7 @@ func ParseRedisAddress(addr string) (*ConnectionOptions, error) {
 	values := redisURL.Query()
 	// Get additional connections options
 
-	// Default to the single mode.
-	mode := Standalone
+	mode := defaultMode
 	if values.Has("mode") {
 		connMode := strings.ToLower(values.Get("mode"))
 		switch ConnectionMode(connMode) {

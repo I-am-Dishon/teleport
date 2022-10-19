@@ -23,7 +23,13 @@ import (
 	"net"
 	"time"
 
+	"github.com/go-mysql-org/go-mysql/client"
+	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/packet"
+	"github.com/go-mysql-org/go-mysql/server"
+
 	"github.com/gravitational/teleport/api/types"
+	"github.com/gravitational/teleport/api/utils/retryutils"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/srv/db/cloud"
@@ -31,9 +37,6 @@ import (
 	"github.com/gravitational/teleport/lib/srv/db/common/role"
 	"github.com/gravitational/teleport/lib/srv/db/mysql/protocol"
 	"github.com/gravitational/teleport/lib/utils"
-	"github.com/siddontang/go-mysql/client"
-	"github.com/siddontang/go-mysql/packet"
-	"github.com/siddontang/go-mysql/server"
 
 	"github.com/gravitational/trace"
 	"github.com/sirupsen/logrus"
@@ -152,10 +155,8 @@ func (e *Engine) checkAccess(ctx context.Context, sessionCtx *common.Session) er
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	mfaParams := services.AccessMFAParams{
-		Verified:       sessionCtx.Identity.MFAVerified != "",
-		AlwaysRequired: ap.GetRequireSessionMFA(),
-	}
+
+	mfaParams := sessionCtx.MFAParams(ap.GetRequireMFAType())
 	dbRoleMatchers := role.DatabaseRoleMatchers(
 		defaults.ProtocolMySQL,
 		sessionCtx.DatabaseUser,
@@ -260,11 +261,26 @@ func (e *Engine) connect(ctx context.Context, sessionCtx *common.Session) (*clie
 		password,
 		sessionCtx.DatabaseName,
 		dialer,
-		connectOpt)
+		connectOpt,
+		// client-set capabilities only.
+		// TODO(smallinsky) Forward "real" capabilities from mysql client to mysql server.
+		withClientCapabilities(
+			mysql.CLIENT_MULTI_RESULTS,
+			mysql.CLIENT_MULTI_STATEMENTS,
+		),
+	)
 	if err != nil {
 		return nil, common.ConvertConnectError(err, sessionCtx)
 	}
 	return conn, nil
+}
+
+func withClientCapabilities(caps ...uint32) func(conn *client.Conn) {
+	return func(conn *client.Conn) {
+		for _, cap := range caps {
+			conn.SetCapability(cap)
+		}
+	}
 }
 
 // receiveFromClient relays protocol messages received from MySQL client
@@ -401,7 +417,7 @@ func (e *Engine) makeAcquireSemaphoreConfig(sessionCtx *common.Session) services
 		},
 		// If multiple connections are being established simultaneously to the
 		// same database as the same user, retry for a few seconds.
-		Retry: utils.LinearConfig{
+		Retry: retryutils.LinearConfig{
 			Step:  time.Second,
 			Max:   time.Second,
 			Clock: e.Clock,

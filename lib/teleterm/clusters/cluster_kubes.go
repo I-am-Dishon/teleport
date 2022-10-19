@@ -19,7 +19,12 @@ package clusters
 import (
 	"context"
 
+	"github.com/gravitational/teleport/api/client/proto"
+	"github.com/gravitational/teleport/api/defaults"
 	"github.com/gravitational/teleport/api/types"
+	"github.com/gravitational/teleport/lib/auth"
+	"github.com/gravitational/teleport/lib/client"
+	api "github.com/gravitational/teleport/lib/teleterm/api/protogen/golang/v1"
 	"github.com/gravitational/teleport/lib/teleterm/api/uri"
 
 	"github.com/gravitational/trace"
@@ -30,36 +35,52 @@ type Kube struct {
 	// URI is the kube URI
 	URI uri.ResourceURI
 
-	types.KubernetesCluster
+	KubernetesCluster types.KubeCluster
 }
 
-// GetKubes returns kube services
-func (c *Cluster) GetKubes(ctx context.Context) ([]Kube, error) {
-	proxyClient, err := c.clusterClient.ConnectToProxy(ctx)
+// GetAllKubes returns kube services
+func (c *Cluster) GetAllKubes(ctx context.Context) ([]Kube, error) {
+	var authClient auth.ClientI
+	var proxyClient *client.ProxyClient
+	var err error
+
+	err = addMetadataToRetryableError(ctx, func() error {
+		proxyClient, err = c.clusterClient.ConnectToProxy(ctx)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+
+		return nil
+	})
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 	defer proxyClient.Close()
 
-	authClient, err := proxyClient.ConnectToCluster(ctx, c.clusterClient.SiteName, true)
+	authClient, err = proxyClient.ConnectToCluster(ctx, c.clusterClient.SiteName)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
+
 	defer authClient.Close()
 
-	services, err := authClient.GetKubeServices(ctx)
+	servers, err := authClient.GetKubernetesServers(ctx)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
 	kubeMap := map[string]Kube{}
-	for _, service := range services {
-		for _, kube := range service.GetKubernetesClusters() {
-			kubeMap[kube.Name] = Kube{
-				URI:               c.URI.AppendKube(kube.Name),
-				KubernetesCluster: *kube,
-			}
+	for _, server := range servers {
+		kube := server.GetCluster()
+		if kube == nil {
+			continue
 		}
+
+		kubeMap[kube.GetName()] = Kube{
+			URI:               c.URI.AppendKube(kube.GetName()),
+			KubernetesCluster: kube,
+		}
+
 	}
 
 	kubes := make([]Kube, 0, len(kubeMap))
@@ -68,4 +89,76 @@ func (c *Cluster) GetKubes(ctx context.Context) ([]Kube, error) {
 	}
 
 	return kubes, nil
+}
+
+// GetKubes returns a paginated kubes list
+func (c *Cluster) GetKubes(ctx context.Context, r *api.GetKubesRequest) (*GetKubesResponse, error) {
+	var (
+		resp *types.ListResourcesResponse
+
+		authClient  auth.ClientI
+		proxyClient *client.ProxyClient
+		err         error
+	)
+
+	sortBy := types.GetSortByFromString(r.SortBy)
+	err = addMetadataToRetryableError(ctx, func() error {
+		proxyClient, err = c.clusterClient.ConnectToProxy(ctx)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		defer proxyClient.Close()
+
+		authClient, err = proxyClient.ConnectToCluster(ctx, c.clusterClient.SiteName)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		defer authClient.Close()
+
+		resp, err = authClient.ListResources(ctx, proto.ListResourcesRequest{
+			Namespace:           defaults.Namespace,
+			ResourceType:        types.KindKubernetesCluster,
+			Limit:               r.Limit,
+			SortBy:              sortBy,
+			StartKey:            r.StartKey,
+			PredicateExpression: r.Query,
+			SearchKeywords:      client.ParseSearchKeywords(r.Search, ' '),
+			UseSearchAsRoles:    r.SearchAsRoles == "yes",
+		})
+		if err != nil {
+			return trace.Wrap(err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	kubeClusters, err := types.ResourcesWithLabels(resp.Resources).AsKubeClusters()
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	results := []Kube{}
+	for _, cluster := range kubeClusters {
+		results = append(results, Kube{
+			URI:               c.URI.AppendKube(cluster.GetName()),
+			KubernetesCluster: cluster,
+		})
+	}
+
+	return &GetKubesResponse{
+		Kubes:      results,
+		StartKey:   resp.NextKey,
+		TotalCount: resp.TotalCount,
+	}, nil
+}
+
+type GetKubesResponse struct {
+	Kubes []Kube
+	// StartKey is the next key to use as a starting point.
+	StartKey string
+	// // TotalCount is the total number of resources available as a whole.
+	TotalCount int
 }

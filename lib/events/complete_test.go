@@ -22,14 +22,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gravitational/trace"
+	"github.com/jonboulle/clockwork"
+	"github.com/stretchr/testify/require"
+
 	"github.com/gravitational/teleport/api/client/proto"
 	"github.com/gravitational/teleport/api/types"
 	apievents "github.com/gravitational/teleport/api/types/events"
 	"github.com/gravitational/teleport/lib/events/eventstest"
 	"github.com/gravitational/teleport/lib/session"
-	"github.com/gravitational/trace"
-	"github.com/jonboulle/clockwork"
-	"github.com/stretchr/testify/require"
 )
 
 // TestUploadCompleterCompletesAbandonedUploads verifies that the upload completer
@@ -64,6 +65,7 @@ func TestUploadCompleterCompletesAbandonedUploads(t *testing.T) {
 		AuditLog:       log,
 		SessionTracker: sessionTrackerService,
 		Clock:          clock,
+		ClusterName:    "teleport-cluster",
 	})
 	require.NoError(t, err)
 
@@ -76,48 +78,6 @@ func TestUploadCompleterCompletesAbandonedUploads(t *testing.T) {
 
 	clock.Advance(1 * time.Hour)
 
-	err = uc.checkUploads(context.Background())
-	require.NoError(t, err)
-	require.True(t, mu.uploads[upload.ID].completed)
-}
-
-// TestUploadCompleterWithGracePeriod verifies that the upload completer
-// completes uploads that have lived past the configured grace period.
-// DELETE IN 11.0.0
-func TestUploadCompleterWithGracePeriod(t *testing.T) {
-	clock := clockwork.NewFakeClock()
-	mu := NewMemoryUploader()
-	mu.Clock = clock
-
-	log := &mockAuditLog{}
-
-	sessionID := session.NewID()
-	sessionTrackerService := &mockSessionTrackerService{}
-
-	uc, err := NewUploadCompleter(UploadCompleterConfig{
-		Uploader:       mu,
-		AuditLog:       log,
-		SessionTracker: sessionTrackerService,
-		Clock:          clock,
-		GracePeriod:    2 * time.Hour,
-	})
-	require.NoError(t, err)
-
-	upload, err := mu.CreateUpload(context.Background(), sessionID)
-	require.NoError(t, err)
-
-	err = uc.checkUploads(context.Background())
-	require.NoError(t, err)
-	require.False(t, mu.uploads[upload.ID].completed)
-
-	// Even if session tracker is not found, the completer
-	// should wait until the grace period to complete it
-	clock.Advance(1 * time.Hour)
-	err = uc.checkUploads(context.Background())
-	require.NoError(t, err)
-	require.False(t, mu.uploads[upload.ID].completed)
-
-	clock.Advance(1 * time.Hour)
 	err = uc.checkUploads(context.Background())
 	require.NoError(t, err)
 	require.True(t, mu.uploads[upload.ID].completed)
@@ -138,9 +98,16 @@ func TestUploadCompleterEmitsSessionEnd(t *testing.T) {
 			clock := clockwork.NewFakeClock()
 			mu := NewMemoryUploader()
 			mu.Clock = clock
+			startTime := clock.Now().UTC()
+			endTime := startTime.Add(2 * time.Minute)
+
+			test.startEvent.SetTime(startTime)
 
 			log := &mockAuditLog{
-				sessionEvents: []apievents.AuditEvent{test.startEvent},
+				sessionEvents: []apievents.AuditEvent{
+					test.startEvent,
+					&apievents.SessionPrint{Metadata: apievents.Metadata{Time: endTime}},
+				},
 			}
 
 			uc, err := NewUploadCompleter(UploadCompleterConfig{
@@ -148,6 +115,7 @@ func TestUploadCompleterEmitsSessionEnd(t *testing.T) {
 				AuditLog:       log,
 				Clock:          clock,
 				SessionTracker: &mockSessionTrackerService{},
+				ClusterName:    "teleport-cluster",
 			})
 			require.NoError(t, err)
 
@@ -172,7 +140,9 @@ func TestUploadCompleterEmitsSessionEnd(t *testing.T) {
 				"should have emitted 2 events, but only got %d", len(log.emitter.Events()))
 
 			require.IsType(t, &apievents.SessionUpload{}, log.emitter.Events()[0])
+			require.Equal(t, startTime, log.emitter.Events()[0].GetTime())
 			require.Equal(t, test.endEventType, log.emitter.Events()[1].GetType())
+			require.Equal(t, endTime, log.emitter.Events()[1].GetTime())
 		})
 	}
 }
@@ -233,7 +203,7 @@ func (m *mockSessionTrackerService) GetSessionTracker(ctx context.Context, sessi
 	return nil, trace.NotFound("tracker not found")
 }
 
-func (m *mockSessionTrackerService) CreateSessionTracker(ctx context.Context, req *proto.CreateSessionTrackerRequest) (types.SessionTracker, error) {
+func (m *mockSessionTrackerService) CreateSessionTracker(ctx context.Context, st types.SessionTracker) (types.SessionTracker, error) {
 	return nil, trace.NotImplemented("CreateSessionTracker is not implemented")
 }
 

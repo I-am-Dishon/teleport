@@ -31,8 +31,8 @@ import (
 	"github.com/gravitational/teleport/lib/srv/db/mysql/protocol"
 	"github.com/gravitational/teleport/lib/utils"
 
-	"github.com/siddontang/go-mysql/mysql"
-	"github.com/siddontang/go-mysql/server"
+	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/server"
 
 	"github.com/gravitational/trace"
 	"github.com/sirupsen/logrus"
@@ -169,7 +169,7 @@ func (p *Proxy) makeServer(clientConn net.Conn, serverVersion string) *server.Co
 // performHandshake performs the initial handshake between MySQL client and
 // this server, up to the point where the client sends us a certificate for
 // authentication, and returns the upgraded connection.
-func (p *Proxy) performHandshake(conn *multiplexer.Conn, server *server.Conn) (*tls.Conn, error) {
+func (p *Proxy) performHandshake(conn *multiplexer.Conn, server *server.Conn) (utils.TLSConn, error) {
 	// MySQL protocol is server-initiated which means the client will expect
 	// server to send initial handshake message.
 	err := server.WriteInitialHandshake()
@@ -194,10 +194,11 @@ func (p *Proxy) performHandshake(conn *multiplexer.Conn, server *server.Conn) (*
 	case *tls.Conn:
 		return c, nil
 	case *multiplexer.Conn:
-		tlsConn, ok := c.Conn.(*tls.Conn)
+		tlsConn, ok := c.Conn.(utils.TLSConn)
 		if !ok {
 			return nil, trace.BadParameter("expected TLS connection, got: %T", c.Conn)
 		}
+
 		return tlsConn, nil
 	}
 	return nil, trace.BadParameter("expected *tls.Conn or *multiplexer.Conn, got: %T",
@@ -212,7 +213,7 @@ func (p *Proxy) maybeReadProxyLine(conn *multiplexer.Conn) error {
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	if proto != multiplexer.ProtoProxy {
+	if proto != multiplexer.ProtoProxy && proto != multiplexer.ProtoProxyV2 {
 		return nil
 	}
 	proxyLine, err := conn.ReadProxyLine()

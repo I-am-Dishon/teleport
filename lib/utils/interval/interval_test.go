@@ -15,8 +15,70 @@
 package interval
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 )
+
+// TestIntervalReset verifies the basic behavior of the interval reset functionality.
+// Since time based tests tend to be flaky, this test passes if it has a >50% success
+// rate (i.e. >50% of resets seemed to have actually extended the timer successfully).
+func TestIntervalReset(t *testing.T) {
+	const iterations = 1_000
+	const duration = time.Millisecond * 666
+
+	var success, failure atomic.Uint64
+	var wg sync.WaitGroup
+
+	for i := 0; i < iterations; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			resetTimer := time.NewTimer(duration / 3)
+			defer resetTimer.Stop()
+
+			interval := New(Config{
+				Duration: duration,
+			})
+			defer interval.Stop()
+
+			start := time.Now()
+
+			for i := 0; i < 6; i++ {
+				select {
+				case <-interval.Next():
+					failure.Add(1)
+					return
+				case <-resetTimer.C:
+					interval.Reset()
+					resetTimer.Reset(duration / 3)
+				}
+			}
+
+			<-interval.Next()
+			elapsed := time.Since(start)
+			// we expect this test to produce elapsed times of
+			// 3*duration if it is working properly. we accept a
+			// margin or error of +/- 1 duration in order to
+			// minimize flakiness.
+			if elapsed > duration*2 && elapsed < duration*4 {
+				success.Add(1)
+			} else {
+				failure.Add(1)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	t.Logf("success=%d, failure=%d", success.Load(), failure.Load())
+
+	require.True(t, success.Load() > failure.Load())
+}
 
 func TestNewNoop(t *testing.T) {
 	i := NewNoop()

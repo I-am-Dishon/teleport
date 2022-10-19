@@ -17,11 +17,12 @@ limitations under the License.
 package events
 
 import (
+	"github.com/gravitational/trace"
+	log "github.com/sirupsen/logrus"
+
 	"github.com/gravitational/teleport/api/types/events"
 	apiutils "github.com/gravitational/teleport/api/utils"
 	"github.com/gravitational/teleport/lib/utils"
-	"github.com/gravitational/trace"
-	log "github.com/sirupsen/logrus"
 
 	"encoding/json"
 )
@@ -144,6 +145,8 @@ func FromEventFields(fields EventFields) (events.AuditEvent, error) {
 		e = &events.SessionReject{}
 	case AppSessionStartEvent:
 		e = &events.AppSessionStart{}
+	case AppSessionEndEvent:
+		e = &events.AppSessionEnd{}
 	case AppSessionChunkEvent:
 		e = &events.AppSessionChunk{}
 	case AppSessionRequestEvent:
@@ -166,6 +169,8 @@ func FromEventFields(fields EventFields) (events.AuditEvent, error) {
 		e = &events.DatabaseSessionEnd{}
 	case DatabaseSessionQueryEvent, DatabaseSessionQueryFailedEvent:
 		e = &events.DatabaseSessionQuery{}
+	case DatabaseSessionMalformedPacketEvent:
+		e = &events.DatabaseSessionMalformedPacket{}
 	case DatabaseSessionPostgresParseEvent:
 		e = &events.PostgresParse{}
 	case DatabaseSessionPostgresBindEvent:
@@ -204,6 +209,10 @@ func FromEventFields(fields EventFields) (events.AuditEvent, error) {
 		e = &events.MySQLDebug{}
 	case DatabaseSessionMySQLRefreshEvent:
 		e = &events.MySQLRefresh{}
+	case DatabaseSessionSQLServerRPCRequestEvent:
+		e = &events.SQLServerRPCRequest{}
+	case DatabaseSessionElasticsearchRequestEvent:
+		e = &events.ElasticsearchRequest{}
 	case KubeRequestEvent:
 		e = &events.KubeRequest{}
 	case MFADeviceAddEvent:
@@ -238,8 +247,33 @@ func FromEventFields(fields EventFields) (events.AuditEvent, error) {
 		e = &events.CertificateCreate{}
 	case RenewableCertificateGenerationMismatchEvent:
 		e = &events.RenewableCertificateGenerationMismatch{}
+	case SFTPEvent:
+		e = &events.SFTP{}
+	case UpgradeWindowStartUpdateEvent:
+		e = &events.UpgradeWindowStartUpdate{}
+	case SessionRecordingAccessEvent:
+		e = &events.SessionRecordingAccess{}
+	case SSMRunEvent:
+		e = &events.SSMRun{}
+	case KubernetesClusterCreateEvent:
+		e = &events.KubernetesClusterCreate{}
+	case KubernetesClusterUpdateEvent:
+		e = &events.KubernetesClusterUpdate{}
+	case KubernetesClusterDeleteEvent:
+		e = &events.KubernetesClusterDelete{}
 	case UnknownEvent:
 		e = &events.Unknown{}
+
+	// Cassandra events.
+	case CassandraBatchEventCode:
+		e = &events.CassandraBatch{}
+	case CassandraRegisterEventCode:
+		e = &events.CassandraRegister{}
+	case CassandraPrepareEventCode:
+		e = &events.CassandraPrepare{}
+	case CassandraExecuteEventCode:
+		e = &events.CassandraExecute{}
+
 	default:
 		log.Errorf("Attempted to convert dynamic event of unknown type \"%v\" into protobuf event.", eventType)
 		unknown := &events.Unknown{}

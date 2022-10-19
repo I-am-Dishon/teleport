@@ -71,10 +71,10 @@ type License interface {
 	// SetSupportsDesktopAccess sets desktop access support flag
 	SetSupportsDesktopAccess(Bool)
 
-	// GetSupportsModeratedSessions returns moderated sessions support flag
-	GetSupportsModeratedSessions() Bool
-	// SetSupportsModeratedSessions sets moderated sessions support flag
-	SetSupportsModeratedSessions(Bool)
+	// GetTrial returns the trial flag
+	GetTrial() Bool
+	// SetTrial sets the trial flag
+	SetTrial(Bool)
 
 	// SetLabels sets metadata labels
 	SetLabels(labels map[string]string)
@@ -279,24 +279,24 @@ func (c *LicenseV3) SetSupportsDatabaseAccess(value Bool) {
 	c.Spec.SupportsDatabaseAccess = value
 }
 
-// GetSupportsDesktopAccess returns database access support flag
+// GetSupportsDesktopAccess returns desktop access support flag
 func (c *LicenseV3) GetSupportsDesktopAccess() Bool {
 	return c.Spec.SupportsDesktopAccess
 }
 
-// SetSupportsDesktopAccess sets database access support flag
+// SetSupportsDesktopAccess sets desktop access support flag
 func (c *LicenseV3) SetSupportsDesktopAccess(value Bool) {
 	c.Spec.SupportsDesktopAccess = value
 }
 
-// GetSupportsModeratedSessions returns database access support flag
-func (c *LicenseV3) GetSupportsModeratedSessions() Bool {
-	return c.Spec.SupportsDesktopAccess
+// GetTrial returns the trial flag
+func (c *LicenseV3) GetTrial() Bool {
+	return c.Spec.Trial
 }
 
-// SetSupportsModeratedSessions sets database access support flag
-func (c *LicenseV3) SetSupportsModeratedSessions(value Bool) {
-	c.Spec.SupportsDesktopAccess = value
+// SetTrial sets the trial flag
+func (c *LicenseV3) SetTrial(value Bool) {
+	c.Spec.Trial = value
 }
 
 // String represents a human readable version of license enabled features
@@ -304,6 +304,9 @@ func (c *LicenseV3) String() string {
 	var features []string
 	if !c.Expiry().IsZero() {
 		features = append(features, fmt.Sprintf("expires at %v", c.Expiry()))
+	}
+	if c.GetTrial() {
+		features = append(features, "is trial")
 	}
 	if c.GetReportsUsage() {
 		features = append(features, "reports usage")
@@ -319,9 +322,6 @@ func (c *LicenseV3) String() string {
 	}
 	if c.GetSupportsDesktopAccess() {
 		features = append(features, "supports desktop access")
-	}
-	if c.GetSupportsModeratedSessions() {
-		features = append(features, "supports moderated sessions")
 	}
 	if c.GetCloud() {
 		features = append(features, "is hosted by Gravitational")
@@ -359,6 +359,5 @@ type LicenseSpecV3 struct {
 	ReportsUsage Bool `json:"usage,omitempty"`
 	// Cloud is turned on when teleport is hosted by Gravitational
 	Cloud Bool `json:"cloud,omitempty"`
-	// SupportsModeratedSessions turns on moderated sessions
-	SupportsModeratedSessions Bool `json:"moderated_sessions,omitempty"`
+	Trial Bool `json:"trial,omitempty"`
 }

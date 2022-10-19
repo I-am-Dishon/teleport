@@ -24,6 +24,7 @@ import (
 	"github.com/gravitational/teleport/lib/client"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/fixtures"
+	"github.com/gravitational/teleport/lib/observability/tracing"
 	"github.com/gravitational/teleport/lib/tlsca"
 	"github.com/gravitational/teleport/lib/utils"
 
@@ -93,8 +94,9 @@ func TestCLICommandBuilderGetConnectCommand(t *testing.T) {
 	conf := &client.Config{
 		HomePath:     t.TempDir(),
 		Host:         "localhost",
-		WebProxyAddr: "localhost",
+		WebProxyAddr: "proxy.example.com",
 		SiteName:     "db.example.com",
+		Tracer:       tracing.NoopProvider().Tracer("test"),
 	}
 
 	tc, err := client.NewClient(conf)
@@ -334,11 +336,10 @@ func TestCLICommandBuilderGetConnectCommand(t *testing.T) {
 				execOutput: map[string][]byte{},
 			},
 			cmd: []string{"mongo",
-				"--host", "localhost",
-				"--port", "12345",
 				"--ssl",
 				"--sslPEMKeyFile", "/tmp/keys/example.com/bob-db/db.example.com/mysql-x509.pem",
-				"mydb"},
+				"mongodb://localhost:12345/mydb?serverSelectionTimeoutMS=5000",
+			},
 			wantErr: false,
 		},
 		{
@@ -350,13 +351,12 @@ func TestCLICommandBuilderGetConnectCommand(t *testing.T) {
 				execOutput: map[string][]byte{},
 			},
 			cmd: []string{"mongo",
-				"--host", "localhost",
-				"--port", "12345",
-				"mydb"},
+				"mongodb://localhost:12345/mydb?serverSelectionTimeoutMS=5000",
+			},
 			wantErr: false,
 		},
 		{
-			name:         "mongosh",
+			name:         "mongosh no CA",
 			dbProtocol:   defaults.ProtocolMongoDB,
 			databaseName: "mydb",
 			execer: &fakeExec{
@@ -365,12 +365,11 @@ func TestCLICommandBuilderGetConnectCommand(t *testing.T) {
 				},
 			},
 			cmd: []string{"mongosh",
-				"--host", "localhost",
-				"--port", "12345",
 				"--tls",
 				"--tlsCertificateKeyFile", "/tmp/keys/example.com/bob-db/db.example.com/mysql-x509.pem",
 				"--tlsUseSystemCA",
-				"mydb"},
+				"mongodb://localhost:12345/mydb?serverSelectionTimeoutMS=5000",
+			},
 		},
 		{
 			name:         "mongosh",
@@ -384,12 +383,11 @@ func TestCLICommandBuilderGetConnectCommand(t *testing.T) {
 				},
 			},
 			cmd: []string{"mongosh",
-				"--host", "localhost",
-				"--port", "12345",
 				"--tls",
 				"--tlsCertificateKeyFile", "/tmp/keys/example.com/bob-db/db.example.com/mysql-x509.pem",
 				"--tlsCAFile", "/tmp/keys/example.com/cas/example.com.pem",
-				"mydb"},
+				"mongodb://localhost:12345/mydb?serverSelectionTimeoutMS=5000",
+			},
 		},
 		{
 			name:         "mongosh no TLS",
@@ -402,9 +400,8 @@ func TestCLICommandBuilderGetConnectCommand(t *testing.T) {
 				},
 			},
 			cmd: []string{"mongosh",
-				"--host", "localhost",
-				"--port", "12345",
-				"mydb"},
+				"mongodb://localhost:12345/mydb?serverSelectionTimeoutMS=5000",
+			},
 		},
 		{
 			name:         "sqlserver",
@@ -455,6 +452,82 @@ func TestCLICommandBuilderGetConnectCommand(t *testing.T) {
 				"-p", "12345"},
 			wantErr: false,
 		},
+		{
+			name:       "redis-cli remote web proxy",
+			dbProtocol: defaults.ProtocolRedis,
+			opts:       []ConnectCommandFunc{WithLocalProxy("", 0, "") /* negate default WithLocalProxy*/},
+			execer:     &fakeExec{},
+			cmd: []string{"redis-cli",
+				"-h", "proxy.example.com",
+				"-p", "3080",
+				"--tls",
+				"--key", "/tmp/keys/example.com/bob",
+				"--cert", "/tmp/keys/example.com/bob-db/db.example.com/mysql-x509.pem",
+				"--sni", "proxy.example.com"},
+			wantErr: false,
+		},
+		{
+			name:       "snowsql no TLS",
+			dbProtocol: defaults.ProtocolSnowflake,
+			opts:       []ConnectCommandFunc{WithNoTLS()},
+			execer:     &fakeExec{},
+			cmd: []string{"snowsql",
+				"-a", "teleport",
+				"-u", "myUser",
+				"-h", "localhost",
+				"-p", "12345"},
+			wantErr: false,
+		},
+		{
+			name:         "snowsql db-name no TLS",
+			dbProtocol:   defaults.ProtocolSnowflake,
+			opts:         []ConnectCommandFunc{WithNoTLS()},
+			execer:       &fakeExec{},
+			databaseName: "warehouse1",
+			cmd: []string{"snowsql",
+				"-a", "teleport",
+				"-u", "myUser",
+				"-h", "localhost",
+				"-p", "12345",
+				"-w", "warehouse1"},
+			wantErr: false,
+		},
+		{
+			name:         "elasticsearch no TLS",
+			dbProtocol:   defaults.ProtocolElasticsearch,
+			opts:         []ConnectCommandFunc{WithNoTLS()},
+			execer:       &fakeExec{},
+			databaseName: "warehouse1",
+			cmd:          []string{"elasticsearch-sql-cli", "http://localhost:12345/"},
+			wantErr:      false,
+		},
+		{
+			name:         "cassandra",
+			dbProtocol:   defaults.ProtocolCassandra,
+			opts:         []ConnectCommandFunc{WithLocalProxy("localhost", 12345, "")},
+			execer:       &fakeExec{},
+			databaseName: "cassandra01",
+			cmd:          []string{"cqlsh", "-u", "myUser", "localhost", "12345"},
+			wantErr:      false,
+		},
+		{
+			name:         "cassandra with password",
+			dbProtocol:   defaults.ProtocolCassandra,
+			opts:         []ConnectCommandFunc{WithLocalProxy("localhost", 12345, ""), WithPassword("password")},
+			execer:       &fakeExec{},
+			databaseName: "cassandra01",
+			cmd:          []string{"cqlsh", "-u", "myUser", "localhost", "12345", "-p", "password"},
+			wantErr:      false,
+		},
+		{
+			name:         "elasticsearch with TLS, errors",
+			dbProtocol:   defaults.ProtocolElasticsearch,
+			opts:         []ConnectCommandFunc{},
+			execer:       &fakeExec{},
+			databaseName: "warehouse1",
+			cmd:          nil,
+			wantErr:      true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -471,11 +544,11 @@ func TestCLICommandBuilderGetConnectCommand(t *testing.T) {
 
 			opts := append([]ConnectCommandFunc{
 				WithLocalProxy("localhost", 12345, ""),
+				WithExecer(tt.execer),
 			}, tt.opts...)
 
 			c := NewCmdBuilder(tc, profile, database, "root", opts...)
 			c.uid = utils.NewFakeUID()
-			c.exe = tt.execer
 			got, err := c.GetConnectCommand()
 			if tt.wantErr {
 				if err == nil {
@@ -490,12 +563,128 @@ func TestCLICommandBuilderGetConnectCommand(t *testing.T) {
 	}
 }
 
+func TestCLICommandBuilderGetConnectCommandAlternatives(t *testing.T) {
+	conf := &client.Config{
+		HomePath:     t.TempDir(),
+		Host:         "localhost",
+		WebProxyAddr: "proxy.example.com",
+		SiteName:     "db.example.com",
+		Tracer:       tracing.NoopProvider().Tracer("test"),
+	}
+
+	tc, err := client.NewClient(conf)
+	require.NoError(t, err)
+
+	profile := &client.ProfileStatus{
+		Name:     "example.com",
+		Username: "bob",
+		Dir:      "/tmp",
+	}
+
+	tests := []struct {
+		name         string
+		opts         []ConnectCommandFunc
+		dbProtocol   string
+		databaseName string
+		execer       *fakeExec
+		cmd          map[string][]string
+		wantErr      bool
+	}{
+		{
+			name:         "postgres no TLS",
+			dbProtocol:   defaults.ProtocolPostgres,
+			databaseName: "mydb",
+			opts:         []ConnectCommandFunc{WithNoTLS()},
+			execer:       &fakeExec{},
+			cmd:          map[string][]string{"default command": {"psql", "postgres://myUser@localhost:12345/mydb"}},
+			wantErr:      false,
+		},
+		{
+			name:         "elasticsearch with TLS",
+			dbProtocol:   defaults.ProtocolElasticsearch,
+			opts:         []ConnectCommandFunc{},
+			execer:       &fakeExec{},
+			databaseName: "warehouse1",
+			cmd:          map[string][]string{"run single request with curl": {"curl", "https://localhost:12345/", "--key", "/tmp/keys/example.com/bob", "--cert", "/tmp/keys/example.com/bob-db/db.example.com/mysql-x509.pem"}},
+			wantErr:      false,
+		},
+		{
+			name:       "elasticsearch with TLS and SQL",
+			dbProtocol: defaults.ProtocolElasticsearch,
+			opts:       []ConnectCommandFunc{},
+			execer: &fakeExec{
+				execOutput: map[string][]byte{
+					"elasticsearch-sql-cli": {},
+				},
+			},
+			databaseName: "warehouse1",
+			cmd: map[string][]string{
+				"run single request with curl": {"curl", "https://localhost:12345/", "--key", "/tmp/keys/example.com/bob", "--cert", "/tmp/keys/example.com/bob-db/db.example.com/mysql-x509.pem"}},
+			wantErr: false,
+		},
+		{
+			name:       "elasticsearch with no TLS, with SQL",
+			dbProtocol: defaults.ProtocolElasticsearch,
+			opts:       []ConnectCommandFunc{WithNoTLS()},
+			execer: &fakeExec{
+				execOutput: map[string][]byte{
+					"python":                {},
+					"elasticsearch-sql-cli": {},
+				},
+			},
+			databaseName: "warehouse1",
+			cmd: map[string][]string{
+				"interactive SQL connection":   {"elasticsearch-sql-cli", "http://localhost:12345/"},
+				"run single request with curl": {"curl", "http://localhost:12345/"},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			database := &tlsca.RouteToDatabase{
+				Protocol:    tt.dbProtocol,
+				Database:    tt.databaseName,
+				Username:    "myUser",
+				ServiceName: "mysql",
+			}
+
+			opts := append([]ConnectCommandFunc{
+				WithLocalProxy("localhost", 12345, ""),
+				WithExecer(tt.execer),
+			}, tt.opts...)
+
+			c := NewCmdBuilder(tc, profile, database, "root", opts...)
+			c.uid = utils.NewFakeUID()
+
+			commandOptions, err := c.GetConnectCommandAlternatives()
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+
+			commands := map[string][]string{}
+			for _, copt := range commandOptions {
+				commands[copt.Description] = copt.Command.Args
+			}
+
+			require.Equal(t, tt.cmd, commands)
+		})
+	}
+}
+
 func TestGetConnectCommandNoAbsPathConvertsAbsolutePathToRelative(t *testing.T) {
 	conf := &client.Config{
 		HomePath:     t.TempDir(),
 		Host:         "localhost",
 		WebProxyAddr: "localhost",
 		SiteName:     "db.example.com",
+		Tracer:       tracing.NoopProvider().Tracer("test"),
 	}
 
 	tc, err := client.NewClient(conf)
@@ -517,11 +706,11 @@ func TestGetConnectCommandNoAbsPathConvertsAbsolutePathToRelative(t *testing.T) 
 	opts := []ConnectCommandFunc{
 		WithLocalProxy("localhost", 12345, ""),
 		WithNoTLS(),
+		WithExecer(&fakeExec{commandPathBehavior: forceAbsolutePath}),
 	}
 
 	c := NewCmdBuilder(tc, profile, database, "root", opts...)
 	c.uid = utils.NewFakeUID()
-	c.exe = &fakeExec{commandPathBehavior: forceAbsolutePath}
 
 	got, err := c.GetConnectCommandNoAbsPath()
 	require.NoError(t, err)
@@ -534,6 +723,7 @@ func TestGetConnectCommandNoAbsPathIsNoopWhenGivenRelativePath(t *testing.T) {
 		Host:         "localhost",
 		WebProxyAddr: "localhost",
 		SiteName:     "db.example.com",
+		Tracer:       tracing.NoopProvider().Tracer("test"),
 	}
 
 	tc, err := client.NewClient(conf)
@@ -555,11 +745,11 @@ func TestGetConnectCommandNoAbsPathIsNoopWhenGivenRelativePath(t *testing.T) {
 	opts := []ConnectCommandFunc{
 		WithLocalProxy("localhost", 12345, ""),
 		WithNoTLS(),
+		WithExecer(&fakeExec{commandPathBehavior: forceBasePath}),
 	}
 
 	c := NewCmdBuilder(tc, profile, database, "root", opts...)
 	c.uid = utils.NewFakeUID()
-	c.exe = &fakeExec{commandPathBehavior: forceBasePath}
 
 	got, err := c.GetConnectCommandNoAbsPath()
 	require.NoError(t, err)

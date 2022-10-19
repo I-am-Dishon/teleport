@@ -36,12 +36,13 @@ import (
 
 	"github.com/gravitational/teleport"
 	authproto "github.com/gravitational/teleport/api/client/proto"
+	tracessh "github.com/gravitational/teleport/api/observability/tracing/ssh"
 	"github.com/gravitational/teleport/api/types"
+	"github.com/gravitational/teleport/api/utils/keys"
 	wanlib "github.com/gravitational/teleport/lib/auth/webauthn"
 	"github.com/gravitational/teleport/lib/client"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/events"
-	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/utils"
@@ -80,9 +81,16 @@ type TerminalRequest struct {
 	KeepAliveInterval time.Duration
 }
 
+// AuthProvider is a subset of the full Auth API.
+type AuthProvider interface {
+	GetNodes(ctx context.Context, namespace string) ([]types.Server, error)
+	GetSessionEvents(namespace string, sid session.ID, after int, includePrintEvents bool) ([]events.EventFields, error)
+	GetSessionTracker(ctx context.Context, sessionID string) (types.SessionTracker, error)
+}
+
 // NewTerminal creates a web-based terminal based on WebSockets and returns a
 // new TerminalHandler.
-func NewTerminal(req TerminalRequest, getter NodesGetter, sessCtx *SessionContext) (*TerminalHandler, error) {
+func NewTerminal(ctx context.Context, req TerminalRequest, authProvider AuthProvider, sessCtx *SessionContext) (*TerminalHandler, error) {
 	// Make sure whatever session is requested is a valid session.
 	_, err := session.ParseID(string(req.SessionID))
 	if err != nil {
@@ -96,27 +104,45 @@ func NewTerminal(req TerminalRequest, getter NodesGetter, sessCtx *SessionContex
 		return nil, trace.BadParameter("term: bad term dimensions")
 	}
 
+	servers, err := authProvider.GetNodes(ctx, req.Namespace)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
 	// DELETE IN: 5.0
 	//
 	// All proxies will support lookup by uuid, so host/port lookup
 	// and fallback can be dropped entirely.
-	hostName, hostPort, err := resolveServerHostPort(req.Server, getter)
+	hostName, hostPort, err := resolveServerHostPort(req.Server, servers)
 	if err != nil {
 		return nil, trace.BadParameter("invalid server name %q: %v", req.Server, err)
+	}
+
+	var join bool
+	_, err = authProvider.GetSessionTracker(ctx, string(req.SessionID))
+	switch {
+	case trace.IsNotFound(err):
+		join = false
+	case err != nil:
+		return nil, trace.Wrap(err)
+	default:
+		join = true
 	}
 
 	return &TerminalHandler{
 		log: logrus.WithFields(logrus.Fields{
 			trace.Component: teleport.ComponentWebsocket,
 		}),
-		params:   req,
-		ctx:      sessCtx,
-		hostName: hostName,
-		hostPort: hostPort,
-		hostUUID: req.Server,
-		encoder:  unicode.UTF8.NewEncoder(),
-		decoder:  unicode.UTF8.NewDecoder(),
-		wsLock:   &sync.Mutex{},
+		params:       req,
+		ctx:          sessCtx,
+		hostName:     hostName,
+		hostPort:     hostPort,
+		hostUUID:     req.Server,
+		authProvider: authProvider,
+		encoder:      unicode.UTF8.NewEncoder(),
+		decoder:      unicode.UTF8.NewDecoder(),
+		wsLock:       &sync.Mutex{},
+		join:         join,
 	}, nil
 }
 
@@ -126,7 +152,7 @@ type TerminalHandler struct {
 	// log holds the structured logger.
 	log *logrus.Entry
 
-	// params is the initial PTY size.
+	// params describes the request for a PTY
 	params TerminalRequest
 
 	// ctx is a web session context for the currently logged in user.
@@ -142,13 +168,16 @@ type TerminalHandler struct {
 	hostUUID string
 
 	// sshSession holds the "shell" SSH channel to the node.
-	sshSession *ssh.Session
+	sshSession *tracessh.Session
 
 	// terminalContext is used to signal when the terminal sesson is closing.
 	terminalContext context.Context
 
 	// terminalCancel is used to signal when the terminal session is closing.
 	terminalCancel context.CancelFunc
+
+	// authProvider is used to fetch nodes and sessions from the backend.
+	authProvider AuthProvider
 
 	// encoder is used to encode strings into UTF-8.
 	encoder *encoding.Encoder
@@ -163,6 +192,9 @@ type TerminalHandler struct {
 	closeOnce sync.Once
 
 	wsLock *sync.Mutex
+
+	// join is set if we're joining an existing session
+	join bool
 }
 
 // Serve builds a connect to the remote node and then pumps back two types of
@@ -286,8 +318,13 @@ func (t *TerminalHandler) makeClient(ws *websocket.Conn, r *http.Request) (*clie
 	// communicate over the websocket.
 	stream := t.asTerminalStream(ws)
 
+	if t.join {
+		clientConfig.HostLogin = teleport.SSHSessionJoinPrincipal
+	} else {
+		clientConfig.HostLogin = t.params.Login
+	}
+
 	clientConfig.ForwardAgent = client.ForwardAgentLocal
-	clientConfig.HostLogin = t.params.Login
 	clientConfig.Namespace = t.params.Namespace
 	clientConfig.Stdout = stream
 	clientConfig.Stderr = stream
@@ -313,9 +350,9 @@ func (t *TerminalHandler) makeClient(ws *websocket.Conn, r *http.Request) (*clie
 	// Save the *ssh.Session after the shell has been created. The session is
 	// used to update all other parties window size to that of the web client and
 	// to allow future window changes.
-	tc.OnShellCreated = func(s *ssh.Session, c *ssh.Client, _ io.ReadWriteCloser) (bool, error) {
+	tc.OnShellCreated = func(s *tracessh.Session, c *tracessh.Client, _ io.ReadWriteCloser) (bool, error) {
 		t.sshSession = s
-		t.windowChange(&t.params.Term)
+		t.windowChange(r.Context(), &t.params.Term)
 
 		return false, nil
 	}
@@ -334,7 +371,7 @@ func (t *TerminalHandler) issueSessionMFACerts(tc *client.TeleportClient, ws *we
 	}
 	defer pc.Close()
 
-	priv, err := ssh.ParsePrivateKey(t.ctx.session.GetPriv())
+	pk, err := keys.ParsePrivateKey(t.ctx.session.GetPriv())
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -343,10 +380,9 @@ func (t *TerminalHandler) issueSessionMFACerts(tc *client.TeleportClient, ws *we
 		RouteToCluster: t.params.Cluster,
 		NodeName:       t.params.Server,
 		ExistingCreds: &client.Key{
-			Pub:     ssh.MarshalAuthorizedKey(priv.PublicKey()),
-			Priv:    t.ctx.session.GetPriv(),
-			Cert:    t.ctx.session.GetPub(),
-			TLSCert: t.ctx.session.GetTLSCert(),
+			PrivateKey: pk,
+			Cert:       t.ctx.session.GetPub(),
+			TLSCert:    t.ctx.session.GetTLSCert(),
 		},
 	}, promptMFAChallenge(ws, t.wsLock, protobufMFACodec{}))
 	if err != nil {
@@ -511,19 +547,12 @@ func (t *TerminalHandler) streamEvents(ws *websocket.Conn, tc *client.TeleportCl
 
 // windowChange is called when the browser window is resized. It sends a
 // "window-change" channel request to the server.
-func (t *TerminalHandler) windowChange(params *session.TerminalParams) {
+func (t *TerminalHandler) windowChange(ctx context.Context, params *session.TerminalParams) {
 	if t.sshSession == nil {
 		return
 	}
 
-	_, err := t.sshSession.SendRequest(
-		sshutils.WindowChangeRequest,
-		false,
-		ssh.Marshal(sshutils.WinChangeReqParams{
-			W: uint32(params.W),
-			H: uint32(params.H),
-		}))
-	if err != nil {
+	if err := t.sshSession.WindowChange(ctx, params.H, params.W); err != nil {
 		t.log.Error(err)
 	}
 }
@@ -541,15 +570,9 @@ func (t *TerminalHandler) writeError(err error, ws *websocket.Conn) error {
 	return nil
 }
 
-// NodesGetter is a function that retrieves a subset of nodes matching
-// the filter criteria.
-type NodesGetter interface {
-	GetNodes(fn func(n services.Node) bool) []types.Server
-}
-
 // resolveServerHostPort parses server name and attempts to resolve hostname
 // and port.
-func resolveServerHostPort(servername string, getter NodesGetter) (string, int, error) {
+func resolveServerHostPort(servername string, existingServers []types.Server) (string, int, error) {
 	// If port is 0, client wants us to figure out which port to use.
 	defaultPort := 0
 
@@ -557,20 +580,12 @@ func resolveServerHostPort(servername string, getter NodesGetter) (string, int, 
 		return "", defaultPort, trace.BadParameter("empty server name")
 	}
 
-	var hostname string
 	// Check if servername is UUID.
-	getter.GetNodes(func(n services.Node) bool {
-		if hostname != "" {
-			return false
+	for i := range existingServers {
+		node := existingServers[i]
+		if node.GetName() == servername {
+			return node.GetHostname(), defaultPort, nil
 		}
-		if n.GetName() == servername {
-			hostname = n.GetHostname()
-		}
-		return false
-	})
-
-	if hostname != "" {
-		return hostname, defaultPort, nil
 	}
 
 	if !strings.Contains(servername, ":") {
@@ -679,7 +694,7 @@ func (t *TerminalHandler) read(out []byte, ws *websocket.Conn) (n int, err error
 
 		// Send the window change request in a goroutine so reads are not blocked
 		// by network connectivity issues.
-		go t.windowChange(params)
+		go t.windowChange(context.TODO(), params)
 
 		return 0, nil
 	default:

@@ -26,9 +26,9 @@ import (
 	"testing"
 
 	"github.com/gravitational/teleport/api/constants"
-	"github.com/gravitational/teleport/tool/tbot/botfs"
-	"github.com/gravitational/teleport/tool/tbot/config"
-	"github.com/gravitational/teleport/tool/tbot/identity"
+	"github.com/gravitational/teleport/lib/tbot/botfs"
+	"github.com/gravitational/teleport/lib/tbot/config"
+	"github.com/gravitational/teleport/lib/tbot/identity"
 	"github.com/gravitational/trace"
 	"github.com/stretchr/testify/require"
 )
@@ -202,7 +202,7 @@ func TestInitMaybeACLs(t *testing.T) {
 
 		// This isn't a default, but unfortunately we need to specify a
 		// non-nobody owner for CI purposes.
-		Owner: fmt.Sprintf("%s:%s", currentUser.Name, currentGroup.Name),
+		Owner: fmt.Sprintf("%s:%s", currentUser.Username, currentGroup.Name),
 	}
 	cfg := testConfigFromCLI(t, cf)
 

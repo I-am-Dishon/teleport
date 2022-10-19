@@ -18,6 +18,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,17 +27,21 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"text/template"
 	"time"
 
 	"github.com/gravitational/trace"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh/agent"
 
+	"github.com/gravitational/teleport"
 	apidefaults "github.com/gravitational/teleport/api/defaults"
 	"github.com/gravitational/teleport/api/types"
 	apievents "github.com/gravitational/teleport/api/types/events"
+	"github.com/gravitational/teleport/api/utils/retryutils"
 	"github.com/gravitational/teleport/lib"
 	"github.com/gravitational/teleport/lib/auth"
+	"github.com/gravitational/teleport/lib/client/db/dbcmd"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/service"
@@ -44,8 +49,8 @@ import (
 	"github.com/gravitational/teleport/lib/utils"
 )
 
-// TestTSHSSH verifies "tsh proxy ssh" command.
-func TestTSHSSH(t *testing.T) {
+// TestSSH verifies "tsh ssh" command.
+func TestSSH(t *testing.T) {
 	lib.SetInsecureDevMode(true)
 	defer lib.SetInsecureDevMode(false)
 
@@ -72,95 +77,47 @@ func TestTSHSSH(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(types.HomeEnvVar, t.TempDir())
-
 			tc.fn(t, s)
 		})
 	}
 }
 
 func testRootClusterSSHAccess(t *testing.T, s *suite) {
-	err := Run([]string{
-		"login",
-		"--insecure",
-		"--debug",
-		"--auth", s.connector.GetName(),
-		"--proxy", s.root.Config.Proxy.WebAddr.String(),
-	}, func(cf *CLIConf) error {
-		cf.mockSSOLogin = mockSSOLogin(t, s.root.GetAuthServer(), s.user)
-		return nil
-	})
-	require.NoError(t, err)
-	err = Run([]string{
+	tshHome := mustLogin(t, s)
+	err := Run(context.Background(), []string{
 		"ssh",
 		s.root.Config.Hostname,
 		"echo", "hello",
-	})
+	}, setHomePath(tshHome))
 	require.NoError(t, err)
 
-	identityFile := path.Join(t.TempDir(), "identity.pem")
-	err = Run([]string{
-		"login",
-		"--insecure",
-		"--debug",
-		"--auth", s.connector.GetName(),
-		"--proxy", s.root.Config.Proxy.WebAddr.String(),
-		"--out", identityFile,
-	}, func(cf *CLIConf) error {
-		cf.mockSSOLogin = mockSSOLogin(t, s.root.GetAuthServer(), s.user)
-		return nil
-	})
-	require.NoError(t, err)
-
-	err = Run([]string{
+	identityFile := mustLoginIdentity(t, s)
+	err = Run(context.Background(), []string{
 		"--proxy", s.root.Config.Proxy.WebAddr.String(),
 		"--insecure",
 		"-i", identityFile,
 		"ssh",
 		"localhost",
 		"echo", "hello",
-	})
+	}, setIdentity(identityFile))
 	require.NoError(t, err)
 }
 
 func testLeafClusterSSHAccess(t *testing.T, s *suite) {
-	err := Run([]string{
-		"login",
-		"--insecure",
-		"--debug",
-		"--auth", s.connector.GetName(),
-		"--proxy", s.root.Config.Proxy.WebAddr.String(),
-		s.leaf.Config.Auth.ClusterName.GetClusterName(),
-	}, func(cf *CLIConf) error {
-		cf.mockSSOLogin = mockSSOLogin(t, s.root.GetAuthServer(), s.user)
-		return nil
-	})
-	require.NoError(t, err)
-
+	tshHome := mustLogin(t, s, s.leaf.Config.Auth.ClusterName.GetClusterName())
 	require.Eventually(t, func() bool {
-		err = Run([]string{
+		err := Run(context.Background(), []string{
 			"ssh",
+			"--proxy", s.root.Config.Proxy.WebAddr.String(),
 			s.leaf.Config.Hostname,
 			"echo", "hello",
-		})
+		}, setHomePath(tshHome))
+		t.Logf("ssh to leaf failed %v", err)
 		return err == nil
 	}, 5*time.Second, time.Second)
 
-	identityFile := path.Join(t.TempDir(), "identity.pem")
-	err = Run([]string{
-		"login",
-		"--insecure",
-		"--debug",
-		"--auth", s.connector.GetName(),
-		"--proxy", s.root.Config.Proxy.WebAddr.String(),
-		"--out", identityFile,
-	}, func(cf *CLIConf) error {
-		cf.mockSSOLogin = mockSSOLogin(t, s.root.GetAuthServer(), s.user)
-		return nil
-	})
-	require.NoError(t, err)
-
-	err = Run([]string{
+	identityFile := mustLoginIdentity(t, s)
+	err := Run(context.Background(), []string{
 		"--proxy", s.root.Config.Proxy.WebAddr.String(),
 		"--insecure",
 		"-i", identityFile,
@@ -168,114 +125,182 @@ func testLeafClusterSSHAccess(t *testing.T, s *suite) {
 		"--cluster", s.leaf.Config.Auth.ClusterName.GetClusterName(),
 		s.leaf.Config.Hostname,
 		"echo", "hello",
-	})
+	}, setIdentity(identityFile))
 	require.NoError(t, err)
 }
 
 func testJumpHostSSHAccess(t *testing.T, s *suite) {
-	err := Run([]string{
-		"login",
-		"--insecure",
-		"--auth", s.connector.GetName(),
-		"--proxy", s.root.Config.Proxy.WebAddr.String(),
-		s.root.Config.Auth.ClusterName.GetClusterName(),
-	}, func(cf *CLIConf) error {
-		cf.mockSSOLogin = mockSSOLogin(t, s.root.GetAuthServer(), s.user)
-		return nil
-	})
-	require.NoError(t, err)
+	// login to root
+	tshHome := mustLogin(t, s, s.root.Config.Auth.ClusterName.GetClusterName())
 
-	err = Run([]string{
+	// Switch to leaf cluster
+	err := Run(context.Background(), []string{
 		"login",
 		"--insecure",
 		s.leaf.Config.Auth.ClusterName.GetClusterName(),
-	}, func(cf *CLIConf) error {
-		cf.mockSSOLogin = mockSSOLogin(t, s.root.GetAuthServer(), s.user)
-		return nil
-	})
+	}, setMockSSOLogin(t, s), setHomePath(tshHome))
 	require.NoError(t, err)
 
 	// Connect to leaf node though jump host set to leaf proxy SSH port.
-	err = Run([]string{
+	err = Run(context.Background(), []string{
 		"ssh",
 		"--insecure",
 		"-J", s.leaf.Config.Proxy.SSHAddr.Addr,
 		s.leaf.Config.Hostname,
 		"echo", "hello",
-	}, func(cf *CLIConf) error {
-		cf.mockSSOLogin = mockSSOLogin(t, s.root.GetAuthServer(), s.user)
-		return nil
-	})
+	}, setMockSSOLogin(t, s), setHomePath(tshHome))
 	require.NoError(t, err)
 
-	// Connect to leaf node though jump host set to proxy web port where TLS Routing is enabled.
-	err = Run([]string{
-		"ssh",
-		"--insecure",
-		"-J", s.leaf.Config.Proxy.WebAddr.Addr,
-		s.leaf.Config.Hostname,
-		"echo", "hello",
-	}, func(cf *CLIConf) error {
-		cf.mockSSOLogin = mockSSOLogin(t, s.root.GetAuthServer(), s.user)
-		return nil
+	t.Run("root cluster online", func(t *testing.T) {
+		// Connect to leaf node though jump host set to proxy web port where TLS Routing is enabled.
+		err = Run(context.Background(), []string{
+			"ssh",
+			"--insecure",
+			"-J", s.leaf.Config.Proxy.WebAddr.Addr,
+			s.leaf.Config.Hostname,
+			"echo", "hello",
+		}, setMockSSOLogin(t, s), setHomePath(tshHome))
+		require.NoError(t, err)
 	})
-	require.NoError(t, err)
+
+	t.Run("root cluster offline", func(t *testing.T) {
+		// Terminate root cluster.
+		err = s.root.Close()
+		require.NoError(t, err)
+
+		// Check JumpHost flow when root cluster is offline.
+		err = Run(context.Background(), []string{
+			"ssh",
+			"--insecure",
+			"-J", s.leaf.Config.Proxy.WebAddr.Addr,
+			s.leaf.Config.Hostname,
+			"echo", "hello",
+		}, setMockSSOLogin(t, s), setHomePath(tshHome))
+		require.NoError(t, err)
+	})
 }
 
-// TestProxySSHDial verifies "tsh proxy ssh" command.
-func TestProxySSHDial(t *testing.T) {
+// TestProxySSH verifies "tsh proxy ssh" functionality
+func TestProxySSH(t *testing.T) {
 	createAgent(t)
 
-	tmpHomePath := t.TempDir()
-
-	connector := mockConnector(t)
-	sshLoginRole, err := types.NewRoleV3("ssh-login", types.RoleSpecV5{
-		Allow: types.RoleConditions{
-			Logins: []string{"alice"},
+	tests := []struct {
+		name string
+		opts []testSuiteOptionFunc
+	}{
+		{
+			name: "TLS routing enabled",
+			opts: []testSuiteOptionFunc{
+				withRootConfigFunc(func(cfg *service.Config) {
+					cfg.Auth.NetworkingConfig.SetProxyListenerMode(types.ProxyListenerMode_Multiplex)
+				}),
+			},
 		},
-	})
+		{
+			name: "TLS routing disabled",
+			opts: []testSuiteOptionFunc{
+				withRootConfigFunc(func(cfg *service.Config) {
+					cfg.Auth.NetworkingConfig.SetProxyListenerMode(types.ProxyListenerMode_Separate)
+				}),
+			},
+		},
+	}
 
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestSuite(t, tc.opts...)
+
+			proxyRequest := fmt.Sprintf("%s.%s:%d",
+				s.root.Config.Proxy.SSHAddr.Host(),
+				s.root.Config.Auth.ClusterName.GetClusterName(),
+				s.root.Config.SSH.Addr.Port(defaults.SSHServerListenPort))
+
+			runProxySSH := func(proxyRequest string, opts ...cliOption) error {
+				return Run(context.Background(), []string{
+					"--insecure",
+					"--proxy", s.root.Config.Proxy.WebAddr.Addr,
+					"proxy", "ssh", proxyRequest,
+				}, opts...)
+			}
+
+			t.Run("login", func(t *testing.T) {
+				t.Parallel()
+
+				// Should fail without login
+				err := runProxySSH(proxyRequest, setHomePath(t.TempDir()))
+				require.Error(t, err)
+
+				// Should succeed with login
+				err = runProxySSH(proxyRequest, setHomePath(mustLogin(t, s)))
+				require.NoError(t, err)
+			})
+
+			t.Run("re-login", func(t *testing.T) {
+				t.Parallel()
+
+				err := runProxySSH(proxyRequest, setHomePath(mustLogin(t, s)), setMockSSOLogin(t, s))
+				require.NoError(t, err)
+			})
+
+			t.Run("identity file", func(t *testing.T) {
+				t.Parallel()
+
+				err := runProxySSH(proxyRequest, setIdentity(mustLoginIdentity(t, s)))
+				require.NoError(t, err)
+			})
+
+			t.Run("invalid node login", func(t *testing.T) {
+				t.Parallel()
+
+				invalidLoginRequest := fmt.Sprintf("%s@%s", "invalidUser", proxyRequest)
+				err := runProxySSH(invalidLoginRequest, setHomePath(mustLogin(t, s)), setMockSSOLogin(t, s))
+				require.Error(t, err)
+				require.True(t, utils.IsHandshakeFailedError(err), "expected handshake error, got %v", err)
+			})
+		})
+
+	}
+}
+
+// TestTSHProxyTemplate verifies connecting with OpenSSH client through the
+// local proxy started with "tsh proxy ssh -J" using proxy templates.
+func TestTSHProxyTemplate(t *testing.T) {
+	_, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("Skipping test, no ssh binary found.")
+	}
+
+	lib.SetInsecureDevMode(true)
+	defer lib.SetInsecureDevMode(false)
+
+	tshPath, err := os.Executable()
 	require.NoError(t, err)
-	alice, err := types.NewUser("alice")
-	require.NoError(t, err)
-	alice.SetRoles([]string{"access", "ssh-login"})
 
-	authProcess, proxyProcess := makeTestServers(t,
-		withBootstrap(connector, alice, sshLoginRole),
-		withAuthConfig(func(cfg *service.AuthConfig) {
-			cfg.NetworkingConfig.SetProxyListenerMode(types.ProxyListenerMode_Multiplex)
-		}),
-	)
+	s := newTestSuite(t)
+	tshHome := mustLoginSetEnv(t, s)
 
-	authServer := authProcess.GetAuthServer()
-	require.NotNil(t, authServer)
+	// Create proxy template configuration.
+	tshConfigFile := filepath.Join(tshHome, tshConfigPath)
+	require.NoError(t, os.MkdirAll(filepath.Dir(tshConfigFile), 0777))
+	require.NoError(t, os.WriteFile(tshConfigFile, []byte(fmt.Sprintf(`
+proxy_templates:
+- template: '^(\w+)\.(root):(.+)$'
+  proxy: "%v"
+  host: "$1:$3"
+`, s.root.Config.Proxy.WebAddr.Addr)), 0644))
 
-	proxyAddr, err := proxyProcess.ProxyWebAddr()
-	require.NoError(t, err)
+	// Create SSH config.
+	sshConfigFile := filepath.Join(tshHome, "sshconfig")
+	os.WriteFile(sshConfigFile, []byte(fmt.Sprintf(`
+Host *
+  HostName %%h
+  StrictHostKeyChecking no
+  ProxyCommand %v -d --insecure proxy ssh -J {{proxy}} %%r@%%h:%%p
+`, tshPath)), 0644)
 
-	err = Run([]string{
-		"login",
-		"--insecure",
-		"--debug",
-		"--auth", connector.GetName(),
-		"--proxy", proxyAddr.String(),
-	}, setHomePath(tmpHomePath), func(cf *CLIConf) error {
-		cf.mockSSOLogin = mockSSOLogin(t, authServer, alice)
-		return nil
-	})
-	require.NoError(t, err)
-
-	unreachableSubsystem := "alice@unknownhost:22"
-
-	// Check if the tsh proxy ssh command can establish a connection to the Teleport proxy.
-	// After connection is established the unknown submodule is requested and the call is expected to fail with the
-	// "subsystem request failed" error.
-	// For real case scenario the 'tsh proxy ssh' and openssh binary use stdin,stdout,stderr pipes
-	// as communication channels but in unit test there is no easy way to mock this behavior.
-	err = Run([]string{
-		"proxy", "ssh", unreachableSubsystem,
-	}, setHomePath(tmpHomePath))
-	require.Contains(t, err.Error(), "subsystem request failed")
+	// Connect to "localnode" with OpenSSH.
+	mustRunOpenSSHCommand(t, sshConfigFile, "localnode.root",
+		s.root.Config.SSH.Addr.Port(defaults.SSHServerListenPort), "echo", "hello")
 }
 
 // TestTSHConfigConnectWithOpenSSHClient tests OpenSSH configuration generated by tsh config command and
@@ -334,11 +359,10 @@ func TestTSHConfigConnectWithOpenSSHClient(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(types.HomeEnvVar, t.TempDir())
-
 			s := newTestSuite(t, tc.opts...)
+
 			// Login to the Teleport proxy.
-			mustLogin(t, s)
+			mustLoginSetEnv(t, s)
 
 			// Get SSH config file generated by the 'tsh config' command.
 			sshConfigFile := mustGetOpenSSHConfigFile(t)
@@ -352,13 +376,63 @@ func TestTSHConfigConnectWithOpenSSHClient(t *testing.T) {
 
 			// Try to run ssh command using the OpenSSH client with invalid node login username.
 			// Command should fail because nodeLogin 'invalidUser' is not in valid principals.
-			sshConn = fmt.Sprintf("invalidUser@%s.%s",
-				s.root.Config.Hostname, s.root.Config.Auth.ClusterName.GetClusterName())
+			sshConn = fmt.Sprintf("invalidUser@%s", sshConn)
 			mustFailToRunOpenSSHCommand(t, sshConfigFile, sshConn, nodePort, bashCmd...)
 
-			events := mustSearchEvents(t, s.root.GetAuthServer())
 			// Check if failed login attempt event has proper nodeLogin.
-			mustFindFailedNodeLoginAttempt(t, events, "invalidUser")
+			mustFindFailedNodeLoginAttempt(t, s, "invalidUser")
+		})
+	}
+}
+
+func TestEnvVarCommand(t *testing.T) {
+	tests := []struct {
+		inputFormat  string
+		inputKey     string
+		inputValue   string
+		expectOutput string
+		expectError  bool
+	}{
+		{
+			inputFormat:  envVarFormatText,
+			inputKey:     "key",
+			inputValue:   "value",
+			expectOutput: "key=value",
+		},
+		{
+			inputFormat:  envVarFormatUnix,
+			inputKey:     "key",
+			inputValue:   "value",
+			expectOutput: "export key=value",
+		},
+		{
+			inputFormat:  envVarFormatWindowsCommandPrompt,
+			inputKey:     "key",
+			inputValue:   "value",
+			expectOutput: "set key=value",
+		},
+		{
+			inputFormat:  envVarFormatWindowsPowershell,
+			inputKey:     "key",
+			inputValue:   "value",
+			expectOutput: "$Env:key=\"value\"",
+		},
+		{
+			inputFormat: "unknown",
+			inputKey:    "key",
+			inputValue:  "value",
+			expectError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.inputFormat, func(t *testing.T) {
+			actualOutput, err := envVarCommand(test.inputFormat, test.inputKey, test.inputValue)
+			if test.expectError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, test.expectOutput, actualOutput)
+			}
 		})
 	}
 }
@@ -369,55 +443,76 @@ func createAgent(t *testing.T) string {
 	user, err := user.Current()
 	require.NoError(t, err)
 
-	// Create own tmp dir instead of using t.TmpDir
-	// because  net.Listen("unix", path) has dir path length limitation and
-	// the t.TmpDir calls creates tmp dir with test name.
-	sockDir, err := os.MkdirTemp("", "test")
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		os.RemoveAll(sockDir)
-	})
+	sockDir := "test"
+	sockName := "agent.sock"
 
-	sockPath := filepath.Join(sockDir, "agent.sock")
-	t.Setenv("SSH_AUTH_SOCK", sockPath)
+	keyring, ok := agent.NewKeyring().(agent.ExtendedAgent)
+	require.True(t, ok)
 
-	uid, err := strconv.Atoi(user.Uid)
-	require.NoError(t, err)
-	gid, err := strconv.Atoi(user.Gid)
-	require.NoError(t, err)
-
-	keyring := agent.NewKeyring()
 	teleAgent := teleagent.NewServer(func() (teleagent.Agent, error) {
 		return teleagent.NopCloser(keyring), nil
 	})
 
 	// Start the SSH agent.
-	err = teleAgent.ListenUnixSocket(sockPath, uid, gid, 0600)
+	err = teleAgent.ListenUnixSocket(sockDir, sockName, user)
 	require.NoError(t, err)
 	go teleAgent.Serve()
 	t.Cleanup(func() {
 		teleAgent.Close()
 	})
-	return sockPath
+
+	t.Setenv(teleport.SSHAuthSock, teleAgent.Path)
+
+	return teleAgent.Path
 }
 
-func mustLogin(t *testing.T, s *suite) {
-	err := Run([]string{
+func setMockSSOLogin(t *testing.T, s *suite) cliOption {
+	return func(cf *CLIConf) error {
+		cf.mockSSOLogin = mockSSOLogin(t, s.root.GetAuthServer(), s.user)
+		cf.AuthConnector = s.connector.GetName()
+		return nil
+	}
+}
+
+func mustLogin(t *testing.T, s *suite, args ...string) string {
+	tshHome := t.TempDir()
+	args = append([]string{
 		"login",
 		"--insecure",
 		"--debug",
-		"--auth", s.connector.GetName(),
 		"--proxy", s.root.Config.Proxy.WebAddr.String(),
-	}, func(cf *CLIConf) error {
-		cf.mockSSOLogin = mockSSOLogin(t, s.root.GetAuthServer(), s.user)
-		return nil
-	})
+	}, args...)
+	err := Run(context.Background(), args, setMockSSOLogin(t, s), setHomePath(tshHome))
 	require.NoError(t, err)
+	return tshHome
+}
+
+// login with new temp tshHome and set it in Env. This is useful
+// when running "ssh" commands with a tsh "ProxyCommand".
+func mustLoginSetEnv(t *testing.T, s *suite, args ...string) string {
+	tshHome := t.TempDir()
+	t.Setenv(types.HomeEnvVar, tshHome)
+
+	args = append([]string{
+		"login",
+		"--insecure",
+		"--debug",
+		"--proxy", s.root.Config.Proxy.WebAddr.String(),
+	}, args...)
+	err := Run(context.Background(), args, setMockSSOLogin(t, s), setHomePath(tshHome))
+	require.NoError(t, err)
+	return tshHome
+}
+
+func mustLoginIdentity(t *testing.T, s *suite, opts ...cliOption) string {
+	identityFile := path.Join(t.TempDir(), "identity.pem")
+	mustLogin(t, s, "--out", identityFile)
+	return identityFile
 }
 
 func mustGetOpenSSHConfigFile(t *testing.T) string {
 	var buff bytes.Buffer
-	err := Run([]string{
+	err := Run(context.Background(), []string{
 		"config",
 	}, func(cf *CLIConf) error {
 		cf.overrideStdout = &buff
@@ -460,7 +555,7 @@ func runOpenSSHCommand(t *testing.T, configFile string, sshConnString string, po
 }
 
 func mustRunOpenSSHCommand(t *testing.T, configFile string, sshConnString string, port int, args ...string) {
-	err := utils.RetryStaticFor(time.Second*10, time.Millisecond*500, func() error {
+	err := retryutils.RetryStaticFor(time.Second*10, time.Millisecond*500, func() error {
 		err := runOpenSSHCommand(t, configFile, sshConnString, port, args...)
 		return trace.Wrap(err)
 	})
@@ -487,12 +582,134 @@ func mustSearchEvents(t *testing.T, auth *auth.Server) []apievents.AuditEvent {
 	return events
 }
 
-func mustFindFailedNodeLoginAttempt(t *testing.T, av []apievents.AuditEvent, nodeLogin string) {
+func mustFindFailedNodeLoginAttempt(t *testing.T, s *suite, nodeLogin string) {
+	av := mustSearchEvents(t, s.root.GetAuthServer())
 	for _, e := range av {
 		if e.GetCode() == events.AuthAttemptFailureCode {
 			require.Equal(t, e.(*apievents.AuthAttempt).Login, nodeLogin)
 			return
 		}
 	}
-	t.Error("failed to find AuthAttemptFailureCode event")
+	t.Errorf("failed to find AuthAttemptFailureCode event (0/%d events matched)", len(av))
+}
+
+func TestFormatCommand(t *testing.T) {
+	setEnv := func(command *exec.Cmd, envs ...string) *exec.Cmd {
+		command.Env = append(command.Env, envs...)
+		return command
+	}
+
+	tests := []struct {
+		name string
+		cmd  *exec.Cmd
+		want string
+	}{
+		{
+			name: "simple command",
+			cmd:  exec.Command("echo", "hello"),
+			want: "echo hello",
+		},
+		{
+			name: "whitespace arguments",
+			cmd: exec.Command("echo", "hello world", "return\n\r", `1
+2
+3`),
+			want: "echo \"hello world\" \"return\n\r\" \"1\n2\n3\"",
+		},
+		{
+			name: "args and env",
+			cmd:  setEnv(exec.Command("echo", "hello"), "DEBUG=1", "RUN=YES"),
+			want: "DEBUG=1 RUN=YES echo hello",
+		},
+		{
+			name: "args, whitespace and env",
+			cmd:  setEnv(exec.Command("echo", "hello\"\nworld"), "DEBUG=1", "RUN=YES"),
+			want: "DEBUG=1 RUN=YES echo \"hello\\\"\nworld\"",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, formatCommand(tt.cmd))
+		})
+	}
+}
+
+func Test_chooseProxyCommandTemplate(t *testing.T) {
+	tests := []struct {
+		name             string
+		commands         []dbcmd.CommandAlternative
+		wantTemplate     *template.Template
+		wantTemplateArgs map[string]any
+		wantOutput       string
+	}{
+		{
+			name: "single command",
+			commands: []dbcmd.CommandAlternative{
+				{
+					Description: "default",
+					Command:     exec.Command("echo", "hello world"),
+				},
+			},
+			wantTemplate:     dbProxyAuthTpl,
+			wantTemplateArgs: map[string]any{"command": "echo \"hello world\""},
+			wantOutput: `Started authenticated tunnel for the MySQL database "mydb" in cluster "mycluster" on 127.0.0.1:64444.
+
+Use the following command to connect to the database:
+  $ echo "hello world"
+`,
+		},
+		{
+			name: "multiple commands",
+			commands: []dbcmd.CommandAlternative{
+				{
+					Description: "default",
+					Command:     exec.Command("echo", "hello world"),
+				},
+				{
+					Description: "alternative",
+					Command:     exec.Command("echo", "goodbye world"),
+				},
+			},
+			wantTemplate: dbProxyAuthMultiTpl,
+			wantTemplateArgs: map[string]any{
+				"commands": []templateCommandItem{
+					{Description: "default", Command: "echo \"hello world\""},
+					{Description: "alternative", Command: "echo \"goodbye world\""},
+				},
+			},
+			wantOutput: `Started authenticated tunnel for the MySQL database "mydb" in cluster "mycluster" on 127.0.0.1:64444.
+
+Use one of the following commands to connect to the database:
+
+  * default: 
+
+  $ echo "hello world"
+
+  * alternative: 
+
+  $ echo "goodbye world"
+
+`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			templateArgs := map[string]any{}
+			tpl := chooseProxyCommandTemplate(templateArgs, tt.commands)
+			require.Equal(t, tt.wantTemplate, tpl)
+			require.Equal(t, tt.wantTemplateArgs, templateArgs)
+
+			// test resulting template
+
+			templateArgs["database"] = "mydb"
+			templateArgs["cluster"] = "mycluster"
+			templateArgs["address"] = "127.0.0.1:64444"
+			templateArgs["type"] = defaults.ReadableDatabaseProtocol(defaults.ProtocolMySQL)
+
+			buf := new(bytes.Buffer)
+			err := tpl.Execute(buf, templateArgs)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantOutput, buf.String())
+		})
+	}
 }

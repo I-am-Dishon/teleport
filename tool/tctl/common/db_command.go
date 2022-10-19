@@ -24,7 +24,6 @@ import (
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/api/client"
 	"github.com/gravitational/teleport/api/client/proto"
-	apidefaults "github.com/gravitational/teleport/api/defaults"
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/lib/auth"
 	libclient "github.com/gravitational/teleport/lib/client"
@@ -67,10 +66,10 @@ func (c *DBCommand) Initialize(app *kingpin.Application, config *service.Config)
 }
 
 // TryRun attempts to run subcommands like "db ls".
-func (c *DBCommand) TryRun(cmd string, client auth.ClientI) (match bool, err error) {
+func (c *DBCommand) TryRun(ctx context.Context, cmd string, client auth.ClientI) (match bool, err error) {
 	switch cmd {
 	case c.dbList.FullCommand():
-		err = c.ListDatabases(client)
+		err = c.ListDatabases(ctx, client)
 	default:
 		return false, nil
 	}
@@ -79,9 +78,7 @@ func (c *DBCommand) TryRun(cmd string, client auth.ClientI) (match bool, err err
 
 // ListDatabases prints the list of database proxies that have recently sent
 // heartbeats to the cluster.
-func (c *DBCommand) ListDatabases(clt auth.ClientI) error {
-	ctx := context.TODO()
-
+func (c *DBCommand) ListDatabases(ctx context.Context, clt auth.ClientI) error {
 	labels, err := libclient.ParseLabelSpec(c.labels)
 	if err != nil {
 		return trace.Wrap(err)
@@ -95,15 +92,6 @@ func (c *DBCommand) ListDatabases(clt auth.ClientI) error {
 		SearchKeywords:      libclient.ParseSearchKeywords(c.searchKeywords, ','),
 	})
 	switch {
-	// Underlying ListResources for db servers not available, use fallback.
-	// Using filter flags with older auth will silently do nothing.
-	//
-	// DELETE IN 11.0.0
-	case trace.IsNotImplemented(err):
-		servers, err = clt.GetDatabaseServers(ctx, apidefaults.Namespace)
-		if err != nil {
-			return trace.Wrap(err)
-		}
 	case err != nil:
 		if utils.IsPredicateError(err) {
 			return trace.Wrap(utils.PredicateError{Err: err})
@@ -129,7 +117,7 @@ func (c *DBCommand) ListDatabases(clt auth.ClientI) error {
 	}
 }
 
-var dbMessageTemplate = template.Must(template.New("db").Parse(`The invite token: {{.token}}.
+var dbMessageTemplate = template.Must(template.New("db").Parse(`The invite token: {{.token}}
 This token will expire in {{.minutes}} minutes.
 
 Fill out and run this command on a node to start proxying the database:
@@ -147,7 +135,7 @@ Or, generate the configuration and start a Teleport agent using it:
 > teleport db configure create \
    --token={{.token}} \{{range .ca_pins}}
    --ca-pin={{.}} \{{end}}
-   --auth-server={{.auth_server}} \
+   --proxy={{.auth_server}} \
    --name={{.db_name}} \
    --protocol={{.db_protocol}} \
    --uri={{.db_uri}} \

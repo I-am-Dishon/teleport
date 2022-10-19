@@ -27,8 +27,10 @@ import (
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/api/types"
+	apievents "github.com/gravitational/teleport/api/types/events"
 	apisshutils "github.com/gravitational/teleport/api/utils/sshutils"
 	"github.com/gravitational/teleport/lib/auth"
+	"github.com/gravitational/teleport/lib/auth/keystore"
 	"github.com/gravitational/teleport/lib/auth/testauthority"
 	"github.com/gravitational/teleport/lib/backend/lite"
 	"github.com/gravitational/teleport/lib/bpf"
@@ -37,7 +39,6 @@ import (
 	"github.com/gravitational/teleport/lib/pam"
 	restricted "github.com/gravitational/teleport/lib/restrictedsession"
 	"github.com/gravitational/teleport/lib/services"
-	rsession "github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/utils"
 	"github.com/gravitational/trace"
@@ -47,7 +48,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func newTestServerContext(t *testing.T, srv Server) *ServerContext {
+func newTestServerContext(t *testing.T, srv Server, roleSet services.RoleSet) *ServerContext {
 	usr, err := user.Current()
 	require.NoError(t, err)
 
@@ -59,6 +60,7 @@ func newTestServerContext(t *testing.T, srv Server) *ServerContext {
 	sshConn.remoteAddr, _ = utils.ParseAddr("10.0.0.5:4817")
 
 	ctx, cancel := context.WithCancel(context.Background())
+	clusterName := "localhost"
 	scx := &ServerContext{
 		Entry: logrus.NewEntry(logrus.StandardLogger()),
 		ConnectionContext: &sshutils.ConnectionContext{
@@ -67,18 +69,23 @@ func newTestServerContext(t *testing.T, srv Server) *ServerContext {
 		env:                    make(map[string]string),
 		SessionRecordingConfig: types.DefaultSessionRecordingConfig(),
 		IsTestStub:             true,
-		ClusterName:            "localhost",
+		ClusterName:            clusterName,
 		srv:                    srv,
 		Identity: IdentityContext{
 			Login:        usr.Username,
 			TeleportUser: "teleportUser",
 			Certificate:  cert,
+			// roles do not actually exist in mock backend, just need a non-nil
+			// access checker to avoid panic
+			AccessChecker: services.NewAccessCheckerWithRoleSet(
+				&services.AccessInfo{Roles: roleSet.RoleNames()}, clusterName, roleSet),
 		},
 		cancelContext: ctx,
 		cancel:        cancel,
 	}
 
-	scx.ExecRequest = &localExec{Ctx: scx}
+	err = scx.SetExecRequest(&localExec{Ctx: scx})
+	require.NoError(t, err)
 
 	scx.cmdr, scx.cmdw, err = os.Pipe()
 	require.NoError(t, err)
@@ -116,6 +123,9 @@ func newMockServer(t *testing.T) *mockServer {
 		Authority:    testauthority.New(),
 		ClusterName:  clusterName,
 		StaticTokens: staticTokens,
+		KeyStoreConfig: keystore.Config{
+			RSAKeyPairSource: testauthority.New().GenerateKeyPair,
+		},
 	}
 
 	authServer, err := auth.NewServer(authCfg, auth.WithClock(clock))
@@ -137,23 +147,23 @@ type mockServer struct {
 
 // ID is the unique ID of the server.
 func (m *mockServer) ID() string {
-	return "test"
+	return "testID"
 }
 
 // HostUUID is the UUID of the underlying host. For the forwarding
 // server this is the proxy the forwarding server is running in.
 func (m *mockServer) HostUUID() string {
-	return "test"
+	return "testHostUUID"
 }
 
 // GetNamespace returns the namespace the server was created in.
 func (m *mockServer) GetNamespace() string {
-	return "test"
+	return "testNamespace"
 }
 
 // AdvertiseAddr is the publicly addressable address of this server.
 func (m *mockServer) AdvertiseAddr() string {
-	return "test"
+	return "testAdvertiseAddr"
 }
 
 // Component is the type of server, forwarding or regular.
@@ -172,14 +182,9 @@ func (m *mockServer) GetAccessPoint() AccessPoint {
 	return m.auth
 }
 
-// GetSessionServer returns a session server.
-func (m *mockServer) GetSessionServer() rsession.Service {
-	return rsession.NewDiscardSessionServer()
-}
-
 // GetDataDir returns data directory of the server
 func (m *mockServer) GetDataDir() string {
-	return "test"
+	return "testDataDir"
 }
 
 // GetPAM returns PAM configuration for this server.
@@ -220,6 +225,10 @@ func (m *mockServer) GetInfo() types.Server {
 	}
 }
 
+func (m *mockServer) TargetMetadata() apievents.ServerMetadata {
+	return apievents.ServerMetadata{}
+}
+
 // UseTunnel used to determine if this node has connected to this cluster
 // using reverse tunnel.
 func (m *mockServer) UseTunnel() bool {
@@ -249,6 +258,17 @@ func (m *mockServer) GetUtmpPath() (utmp, wtmp string) {
 
 // GetLockWatcher gets the server's lock watcher.
 func (m *mockServer) GetLockWatcher() *services.LockWatcher {
+	return nil
+}
+
+// GetCreateHostUser gets whether the server allows host user creation
+// or not
+func (m *mockServer) GetCreateHostUser() bool {
+	return false
+}
+
+// GetHostUsers
+func (m *mockServer) GetHostUsers() HostUsers {
 	return nil
 }
 

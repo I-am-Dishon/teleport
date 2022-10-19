@@ -56,23 +56,13 @@ func (s *Storage) ReadAll() ([]*Cluster, error) {
 	return clusters, nil
 }
 
-// GetByName returns a cluster by name
-func (s *Storage) GetByName(clusterName string) (*Cluster, error) {
-	cluster, err := s.fromProfile(clusterName, "")
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	return cluster, nil
-}
-
 // GetByURI returns a cluster by URI
 func (s *Storage) GetByURI(clusterURI string) (*Cluster, error) {
 	URI := uri.New(clusterURI)
-	rootClusterName := URI.GetRootClusterName()
+	profileName := URI.GetProfileName()
 	leafClusterName := URI.GetLeafClusterName()
 
-	cluster, err := s.fromProfile(rootClusterName, leafClusterName)
+	cluster, err := s.fromProfile(profileName, leafClusterName)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -80,9 +70,31 @@ func (s *Storage) GetByURI(clusterURI string) (*Cluster, error) {
 	return cluster, nil
 }
 
+// GetByResourceURI returns a cluster by a URI of its resource. Accepts both root and leaf cluster
+// resources and will return a root or leaf cluster accordingly.
+func (s *Storage) GetByResourceURI(resourceURI string) (*Cluster, error) {
+	clusterURI, err := uri.ParseClusterURI(resourceURI)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	cluster, err := s.GetByURI(clusterURI.String())
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	return cluster, nil
+}
+
+// ResolveCluster is an alias for GetByResourceURI.
+func (s *Storage) ResolveCluster(resourceURI string) (*Cluster, error) {
+	cluster, err := s.GetByResourceURI(resourceURI)
+	return cluster, trace.Wrap(err)
+}
+
 // Remove removes a cluster
-func (s *Storage) Remove(ctx context.Context, clusterName string) error {
-	if err := profile.RemoveProfile(s.Dir, clusterName); err != nil {
+func (s *Storage) Remove(ctx context.Context, profileName string) error {
+	if err := profile.RemoveProfile(s.Dir, profileName); err != nil {
 		return trace.Wrap(err)
 	}
 
@@ -99,7 +111,11 @@ func (s *Storage) Add(ctx context.Context, webProxyAddress string) (*Cluster, er
 	clusterName := parseName(webProxyAddress)
 	for _, pname := range profiles {
 		if pname == clusterName {
-			return nil, trace.BadParameter("cluster %v already exists", clusterName)
+			cluster, err := s.fromProfile(clusterName, "")
+			if err != nil {
+				return nil, trace.Wrap(err)
+			}
+			return cluster, nil
 		}
 	}
 
@@ -127,8 +143,8 @@ func (s *Storage) addCluster(ctx context.Context, dir, webProxyAddress string) (
 	cfg.KeysDir = s.Dir
 	cfg.InsecureSkipVerify = s.InsecureSkipVerify
 
-	clusterName := parseName(webProxyAddress)
-	clusterURI := uri.NewClusterURI(clusterName)
+	profileName := parseName(webProxyAddress)
+	clusterURI := uri.NewClusterURI(profileName)
 	clusterClient, err := client.NewClient(cfg)
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -140,13 +156,19 @@ func (s *Storage) addCluster(ctx context.Context, dir, webProxyAddress string) (
 		return nil, trace.Wrap(err)
 	}
 
+	webConfig, err := clusterClient.GetWebConfig(ctx)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
 	if err := cfg.SaveProfile(s.Dir, false); err != nil {
 		return nil, trace.Wrap(err)
 	}
 
 	return &Cluster{
 		URI:           clusterURI,
-		Name:          clusterName,
+		Name:          webConfig.ProxyClusterName,
+		ProfileName:   profileName,
 		clusterClient: clusterClient,
 		dir:           s.Dir,
 		clock:         s.Clock,
@@ -197,7 +219,10 @@ func (s *Storage) fromProfile(profileName, leafClusterName string) (*Cluster, er
 		}
 
 		if err := clusterClient.LoadKeyForCluster(status.Cluster); err != nil {
-			return nil, trace.Wrap(err)
+			s.Log.WithError(err).Infof("Could not load key for %s into the local agent.", status.Cluster)
+			if !trace.IsNotImplemented(err) && !trace.IsNotFound(err) {
+				return nil, trace.Wrap(err)
+			}
 		}
 	}
 	if err != nil && !trace.IsNotFound(err) {
@@ -205,10 +230,9 @@ func (s *Storage) fromProfile(profileName, leafClusterName string) (*Cluster, er
 	}
 
 	return &Cluster{
-		URI: clusterURI,
-		// TODO(ravicious): This should probably use leafClusterName if available, but at this point I'm
-		// worried that changing it might break something else in the app.
-		Name:          profileName,
+		URI:           clusterURI,
+		Name:          clusterClient.SiteName,
+		ProfileName:   profileName,
 		clusterClient: clusterClient,
 		dir:           s.Dir,
 		clock:         s.Clock,

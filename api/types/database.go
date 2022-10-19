@@ -18,15 +18,18 @@ package types
 
 import (
 	"fmt"
-	"net"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/google/go-cmp/cmp"
+	"github.com/gravitational/trace"
+	"github.com/sirupsen/logrus"
+
 	"github.com/gravitational/teleport/api/utils"
 	awsutils "github.com/gravitational/teleport/api/utils/aws"
-	"github.com/gravitational/trace"
+	azureutils "github.com/gravitational/teleport/api/utils/azure"
 )
 
 // Database represents a database proxied by a database server.
@@ -76,16 +79,24 @@ type Database interface {
 	GetGCP() GCPCloudSQL
 	// GetAzure returns Azure database server metadata.
 	GetAzure() Azure
+	// SetStatusAzure sets the database Azure metadata in the status field.
+	SetStatusAzure(Azure)
 	// GetAD returns Active Directory database configuration.
 	GetAD() AD
 	// GetType returns the database authentication type: self-hosted, RDS, Redshift or Cloud SQL.
 	GetType() string
 	// GetIAMPolicy returns AWS IAM policy for the database.
-	GetIAMPolicy() string
+	GetIAMPolicy() (string, error)
 	// GetIAMAction returns AWS IAM action needed to connect to the database.
 	GetIAMAction() string
 	// GetIAMResources returns AWS IAM resources that provide access to the database.
 	GetIAMResources() []string
+	// GetSecretStore returns secret store configurations.
+	GetSecretStore() SecretStore
+	// GetManagedUsers returns a list of database users that are managed by Teleport.
+	GetManagedUsers() []string
+	// SetManagedUsers sets a list of database users that are managed by Teleport.
+	SetManagedUsers(users []string)
 	// IsRDS returns true if this is an RDS/Aurora database.
 	IsRDS() bool
 	// IsRedshift returns true if this is a Redshift database.
@@ -94,7 +105,13 @@ type Database interface {
 	IsCloudSQL() bool
 	// IsAzure returns true if this is an Azure database.
 	IsAzure() bool
-	// IsCloudHosted returns true if database is hosted in the cloud (AWS RDS/Aurora/Redshift, Azure or Cloud SQL).
+	// IsElastiCache returns true if this is an AWS ElastiCache database.
+	IsElastiCache() bool
+	// IsMemoryDB returns true if this is an AWS MemoryDB database.
+	IsMemoryDB() bool
+	// IsAWSHosted returns true if database is hosted by AWS.
+	IsAWSHosted() bool
+	// IsCloudHosted returns true if database is hosted in the cloud (AWS, Azure or Cloud SQL).
 	IsCloudHosted() bool
 	// Copy returns a copy of this database resource.
 	Copy() *DatabaseV3
@@ -301,9 +318,22 @@ func (d *DatabaseV3) GetGCP() GCPCloudSQL {
 	return d.Spec.GCP
 }
 
+// IsEmpty returns true if Azure metadata is empty.
+func (a Azure) IsEmpty() bool {
+	return cmp.Equal(a, Azure{})
+}
+
 // GetAzure returns Azure database server metadata.
 func (d *DatabaseV3) GetAzure() Azure {
+	if !d.Status.Azure.IsEmpty() {
+		return d.Status.Azure
+	}
 	return d.Spec.Azure
+}
+
+// SetStatusAzure sets the database Azure metadata in the status field.
+func (d *DatabaseV3) SetStatusAzure(azure Azure) {
+	d.Status.Azure = azure
 }
 
 // GetAD returns Active Directory database configuration.
@@ -331,15 +361,45 @@ func (d *DatabaseV3) IsAzure() bool {
 	return d.GetType() == DatabaseTypeAzure
 }
 
-// IsCloudHosted returns true if database is hosted in the cloud (AWS RDS/Aurora/Redshift, Azure or Cloud SQL).
+// IsElastiCache returns true if this is an AWS ElastiCache database.
+func (d *DatabaseV3) IsElastiCache() bool {
+	return d.GetType() == DatabaseTypeElastiCache
+}
+
+// IsMemoryDB returns true if this is an AWS MemoryDB database.
+func (d *DatabaseV3) IsMemoryDB() bool {
+	return d.GetType() == DatabaseTypeMemoryDB
+}
+
+// IsAWSKeyspaces returns true if this is an AWS hosted Cassandra database.
+func (d *DatabaseV3) IsAWSKeyspaces() bool {
+	return d.GetType() == DatabaseTypeAWSKeyspaces
+}
+
+// IsAWSHosted returns true if database is hosted by AWS.
+func (d *DatabaseV3) IsAWSHosted() bool {
+	return d.IsRDS() || d.IsRedshift() || d.IsElastiCache() || d.IsMemoryDB() || d.IsAWSKeyspaces()
+}
+
+// IsCloudHosted returns true if database is hosted in the cloud (AWS, Azure or
+// Cloud SQL).
 func (d *DatabaseV3) IsCloudHosted() bool {
-	return d.IsRDS() || d.IsRedshift() || d.IsCloudSQL() || d.IsAzure()
+	return d.IsAWSHosted() || d.IsCloudSQL() || d.IsAzure()
 }
 
 // GetType returns the database type.
 func (d *DatabaseV3) GetType() string {
+	if d.GetAWS().AccountID != "" && d.Spec.Protocol == DatabaseTypeCassandra {
+		return DatabaseTypeAWSKeyspaces
+	}
 	if d.GetAWS().Redshift.ClusterID != "" {
 		return DatabaseTypeRedshift
+	}
+	if d.GetAWS().ElastiCache.ReplicationGroupID != "" {
+		return DatabaseTypeElastiCache
+	}
+	if d.GetAWS().MemoryDB.ClusterName != "" {
+		return DatabaseTypeMemoryDB
 	}
 	if d.GetAWS().Region != "" || d.GetAWS().RDS.InstanceID != "" || d.GetAWS().RDS.ClusterID != "" {
 		return DatabaseTypeRDS
@@ -401,11 +461,19 @@ func (d *DatabaseV3) CheckAndSetDefaults() error {
 		return trace.BadParameter("database %q protocol is empty", d.GetName())
 	}
 	if d.Spec.URI == "" {
-		return trace.BadParameter("database %q URI is empty", d.GetName())
+		switch {
+		case d.IsAWSKeyspaces() && d.GetAWS().Region != "":
+			// In case of AWS Hosted Cassandra allow to omit URI.
+			// The URL will be constructed from the database resource based on the region and account ID.
+			d.Spec.URI = awsutils.CassandraEndpointURLForRegion(d.Spec.AWS.Region)
+		default:
+			return trace.BadParameter("database %q URI is empty", d.GetName())
+		}
 	}
 	if d.Spec.MySQL.ServerVersion != "" && d.Spec.Protocol != "mysql" {
 		return trace.BadParameter("MySQL ServerVersion can be only set for MySQL database")
 	}
+
 	// In case of RDS, Aurora or Redshift, AWS information such as region or
 	// cluster ID can be extracted from the endpoint if not provided.
 	switch {
@@ -431,11 +499,66 @@ func (d *DatabaseV3) CheckAndSetDefaults() error {
 		if d.Spec.AWS.Region == "" {
 			d.Spec.AWS.Region = region
 		}
-	case strings.Contains(d.Spec.URI, AzureEndpointSuffix):
-		name, err := parseAzureEndpoint(d.Spec.URI)
+	case awsutils.IsElastiCacheEndpoint(d.Spec.URI):
+		endpointInfo, err := awsutils.ParseElastiCacheEndpoint(d.Spec.URI)
+		if err != nil {
+			logrus.WithError(err).Warnf("Failed to parse %v as ElastiCache endpoint", d.Spec.URI)
+			break
+		}
+		if d.Spec.AWS.ElastiCache.ReplicationGroupID == "" {
+			d.Spec.AWS.ElastiCache.ReplicationGroupID = endpointInfo.ID
+		}
+		if d.Spec.AWS.Region == "" {
+			d.Spec.AWS.Region = endpointInfo.Region
+		}
+		d.Spec.AWS.ElastiCache.TransitEncryptionEnabled = endpointInfo.TransitEncryptionEnabled
+		d.Spec.AWS.ElastiCache.EndpointType = endpointInfo.EndpointType
+	case awsutils.IsMemoryDBEndpoint(d.Spec.URI):
+		endpointInfo, err := awsutils.ParseMemoryDBEndpoint(d.Spec.URI)
+		if err != nil {
+			logrus.WithError(err).Warnf("Failed to parse %v as MemoryDB endpoint", d.Spec.URI)
+			break
+		}
+		if d.Spec.AWS.MemoryDB.ClusterName == "" {
+			d.Spec.AWS.MemoryDB.ClusterName = endpointInfo.ID
+		}
+		if d.Spec.AWS.Region == "" {
+			d.Spec.AWS.Region = endpointInfo.Region
+		}
+		d.Spec.AWS.MemoryDB.TLSEnabled = endpointInfo.TransitEncryptionEnabled
+		d.Spec.AWS.MemoryDB.EndpointType = endpointInfo.EndpointType
+
+	case azureutils.IsDatabaseEndpoint(d.Spec.URI):
+		// For Azure MySQL and PostgresSQL.
+		name, err := azureutils.ParseDatabaseEndpoint(d.Spec.URI)
 		if err != nil {
 			return trace.Wrap(err)
 		}
+		if d.Spec.Azure.Name == "" {
+			d.Spec.Azure.Name = name
+		}
+	case strings.Contains(d.Spec.URI, awsutils.AWSEndpointSuffix) || strings.Contains(d.Spec.URI, awsutils.AWSCNEndpointSuffix):
+		if d.Spec.AWS.AccountID == "" {
+			return trace.BadParameter("database %q AWS account ID is empty", d.GetName())
+		}
+		if d.Spec.AWS.Region == "" {
+			region, err := awsutils.CassandraEndpointRegion(d.Spec.URI)
+			if err != nil {
+				return trace.Wrap(err)
+			}
+			d.Spec.AWS.Region = region
+		}
+	case azureutils.IsCacheForRedisEndpoint(d.Spec.URI):
+		// ResourceID is required for fetching Redis tokens.
+		if d.Spec.Azure.ResourceID == "" {
+			return trace.BadParameter("missing ResourceID for Azure Cache %v", d.Metadata.Name)
+		}
+
+		name, err := azureutils.ParseCacheForRedisEndpoint(d.Spec.URI)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+
 		if d.Spec.Azure.Name == "" {
 			d.Spec.Azure.Name = name
 		}
@@ -443,29 +566,16 @@ func (d *DatabaseV3) CheckAndSetDefaults() error {
 	return nil
 }
 
-// parseAzureEndpoint extracts database server name from Azure endpoint.
-func parseAzureEndpoint(endpoint string) (name string, err error) {
-	host, _, err := net.SplitHostPort(endpoint)
-	if err != nil {
-		return "", trace.Wrap(err)
-	}
-	// Azure endpoint looks like this:
-	// name.mysql.database.azure.com
-	parts := strings.Split(host, ".")
-	if !strings.HasSuffix(host, AzureEndpointSuffix) || len(parts) != 5 {
-		return "", trace.BadParameter("failed to parse %v as Azure endpoint", endpoint)
-	}
-	return parts[0], nil
-}
-
 // GetIAMPolicy returns AWS IAM policy for this database.
-func (d *DatabaseV3) GetIAMPolicy() string {
+func (d *DatabaseV3) GetIAMPolicy() (string, error) {
 	if d.IsRDS() {
-		return d.getRDSPolicy()
+		policy, err := d.getRDSPolicy()
+		return policy, trace.Wrap(err)
 	} else if d.IsRedshift() {
-		return d.getRedshiftPolicy()
+		policy, err := d.getRedshiftPolicy()
+		return policy, trace.Wrap(err)
 	}
-	return ""
+	return "", trace.BadParameter("GetIAMPolicy is not supported policy for database type %s", d.GetType())
 }
 
 // GetIAMAction returns AWS IAM action needed to connect to the database.
@@ -481,30 +591,46 @@ func (d *DatabaseV3) GetIAMAction() string {
 // GetIAMResources returns AWS IAM resources that provide access to the database.
 func (d *DatabaseV3) GetIAMResources() []string {
 	aws := d.GetAWS()
+	partition := awsutils.GetPartitionFromRegion(aws.Region)
 	if d.IsRDS() {
 		if aws.Region != "" && aws.AccountID != "" && aws.RDS.ResourceID != "" {
 			return []string{
-				fmt.Sprintf("arn:aws:rds-db:%v:%v:dbuser:%v/*",
-					aws.Region, aws.AccountID, aws.RDS.ResourceID),
+				fmt.Sprintf("arn:%v:rds-db:%v:%v:dbuser:%v/*",
+					partition, aws.Region, aws.AccountID, aws.RDS.ResourceID),
 			}
 		}
 	} else if d.IsRedshift() {
 		if aws.Region != "" && aws.AccountID != "" && aws.Redshift.ClusterID != "" {
 			return []string{
-				fmt.Sprintf("arn:aws:redshift:%v:%v:dbuser:%v/*",
-					aws.Region, aws.AccountID, aws.Redshift.ClusterID),
-				fmt.Sprintf("arn:aws:redshift:%v:%v:dbname:%v/*",
-					aws.Region, aws.AccountID, aws.Redshift.ClusterID),
-				fmt.Sprintf("arn:aws:redshift:%v:%v:dbgroup:%v/*",
-					aws.Region, aws.AccountID, aws.Redshift.ClusterID),
+				fmt.Sprintf("arn:%v:redshift:%v:%v:dbuser:%v/*",
+					partition, aws.Region, aws.AccountID, aws.Redshift.ClusterID),
+				fmt.Sprintf("arn:%v:redshift:%v:%v:dbname:%v/*",
+					partition, aws.Region, aws.AccountID, aws.Redshift.ClusterID),
+				fmt.Sprintf("arn:%v:redshift:%v:%v:dbgroup:%v/*",
+					partition, aws.Region, aws.AccountID, aws.Redshift.ClusterID),
 			}
 		}
 	}
 	return nil
 }
 
+// GetSecretStore returns secret store configurations.
+func (d *DatabaseV3) GetSecretStore() SecretStore {
+	return d.Spec.AWS.SecretStore
+}
+
+// GetManagedUsers returns a list of database users that are managed by Teleport.
+func (d *DatabaseV3) GetManagedUsers() []string {
+	return d.Status.ManagedUsers
+}
+
+// SetManagedUsers sets a list of database users that are managed by Teleport.
+func (d *DatabaseV3) SetManagedUsers(users []string) {
+	d.Status.ManagedUsers = users
+}
+
 // getRDSPolicy returns IAM policy document for this RDS database.
-func (d *DatabaseV3) getRDSPolicy() string {
+func (d *DatabaseV3) getRDSPolicy() (string, error) {
 	region := d.GetAWS().Region
 	if region == "" {
 		region = "<region>"
@@ -517,12 +643,22 @@ func (d *DatabaseV3) getRDSPolicy() string {
 	if resourceID == "" {
 		resourceID = "<resource_id>"
 	}
-	return fmt.Sprintf(rdsPolicyTemplate,
-		region, accountID, resourceID)
+
+	var sb strings.Builder
+	err := rdsPolicyTemplate.Execute(&sb, arnTemplateInput{
+		Partition:  awsutils.GetPartitionFromRegion(region),
+		Region:     region,
+		AccountID:  accountID,
+		ResourceID: resourceID,
+	})
+	if err != nil {
+		return "", trace.Wrap(err)
+	}
+	return sb.String(), nil
 }
 
 // getRedshiftPolicy returns IAM policy document for this Redshift database.
-func (d *DatabaseV3) getRedshiftPolicy() string {
+func (d *DatabaseV3) getRedshiftPolicy() (string, error) {
 	region := d.GetAWS().Region
 	if region == "" {
 		region = "<region>"
@@ -535,8 +671,18 @@ func (d *DatabaseV3) getRedshiftPolicy() string {
 	if clusterID == "" {
 		clusterID = "<cluster_id>"
 	}
-	return fmt.Sprintf(redshiftPolicyTemplate,
-		region, accountID, clusterID)
+
+	var sb strings.Builder
+	err := redshiftPolicyTemplate.Execute(&sb, arnTemplateInput{
+		Partition:  awsutils.GetPartitionFromRegion(region),
+		Region:     region,
+		AccountID:  accountID,
+		ResourceID: clusterID,
+	})
+	if err != nil {
+		return "", trace.Wrap(err)
+	}
+	return sb.String(), nil
 }
 
 const (
@@ -550,7 +696,20 @@ const (
 	DatabaseTypeCloudSQL = "gcp"
 	// DatabaseTypeAzure is Azure-hosted database.
 	DatabaseTypeAzure = "azure"
+	// DatabaseTypeElastiCache is AWS-hosted ElastiCache database.
+	DatabaseTypeElastiCache = "elasticache"
+	// DatabaseTypeMemoryDB is AWS-hosted MemoryDB database.
+	DatabaseTypeMemoryDB = "memorydb"
+	// DatabaseTypeAWSKeyspaces is AWS-hosted Keyspaces database (Cassandra).
+	DatabaseTypeAWSKeyspaces = "keyspace"
+	// DatabaseTypeCassandra is AWS-hosted Keyspace database.
+	DatabaseTypeCassandra = "cassandra"
 )
+
+// GetServerName returns the GCP database project and instance as "<project-id>:<instance-id>".
+func (gcp GCPCloudSQL) GetServerName() string {
+	return fmt.Sprintf("%s:%s", gcp.ProjectID, gcp.InstanceID)
+}
 
 // DeduplicateDatabases deduplicates databases by name.
 func DeduplicateDatabases(databases []Database) (result []Database) {
@@ -594,36 +753,35 @@ func (d Databases) Less(i, j int) bool { return d[i].GetName() < d[j].GetName() 
 // Swap swaps two databases.
 func (d Databases) Swap(i, j int) { d[i], d[j] = d[j], d[i] }
 
-const (
-	// AzureEndpointSuffix is the Azure database endpoint suffix.
-	AzureEndpointSuffix = ".database.azure.com"
-)
+type arnTemplateInput struct {
+	Partition, Region, AccountID, ResourceID string
+}
 
 var (
 	// rdsPolicyTemplate is the IAM policy template for RDS databases access.
-	rdsPolicyTemplate = `{
+	rdsPolicyTemplate = template.Must(template.New("").Parse(`{
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
       "Action": "rds-db:connect",
-      "Resource": "arn:aws:rds-db:%v:%v:dbuser:%v/*"
+      "Resource": "arn:{{.Partition}}:rds-db:{{.Region}}:{{.AccountID}}:dbuser:{{.ResourceID}}/*"
     }
   ]
-}`
+}`))
 	// redshiftPolicyTemplate is the IAM policy template for Redshift databases access.
-	redshiftPolicyTemplate = `{
+	redshiftPolicyTemplate = template.Must(template.New("").Parse(`{
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
       "Action": "redshift:GetClusterCredentials",
       "Resource": [
-        "arn:aws:redshift:%[1]v:%[2]v:dbuser:%[3]v/*",
-        "arn:aws:redshift:%[1]v:%[2]v:dbname:%[3]v/*",
-        "arn:aws:redshift:%[1]v:%[2]v:dbgroup:%[3]v/*"
+        "arn:{{.Partition}}:redshift:{{.Region}}:{{.AccountID}}:dbuser:{{.ResourceID}}/*",
+        "arn:{{.Partition}}:redshift:{{.Region}}:{{.AccountID}}:dbname:{{.ResourceID}}/*",
+        "arn:{{.Partition}}:redshift:{{.Region}}:{{.AccountID}}:dbgroup:{{.ResourceID}}/*"
       ]
     }
   ]
-}`
+}`))
 )

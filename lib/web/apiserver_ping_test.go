@@ -22,12 +22,13 @@ import (
 	"testing"
 
 	"github.com/gravitational/roundtrip"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/gravitational/teleport/api/client/webclient"
 	"github.com/gravitational/teleport/api/constants"
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/lib/client"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestPing(t *testing.T) {
@@ -49,8 +50,7 @@ func TestPing(t *testing.T) {
 				Type:         constants.Local,
 				SecondFactor: constants.SecondFactorOptional,
 				U2F: &types.U2F{
-					AppID:  "https://example.com",
-					Facets: []string{"https://example.com"},
+					AppID: "https://example.com",
 				},
 				Webauthn: &types.Webauthn{
 					RPID: "example.com",

@@ -27,7 +27,6 @@ import (
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/auth/testauthority"
-	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/utils"
 
@@ -53,8 +52,6 @@ func TestServerKeyAuth(t *testing.T) {
 				PublicKey:      pub,
 			}},
 		},
-		Roles:      nil,
-		SigningAlg: types.CertAuthoritySpecV2_RSA_SHA2_256,
 	})
 	require.NoError(t, err)
 
@@ -76,7 +73,6 @@ func TestServerKeyAuth(t *testing.T) {
 			key: func() ssh.PublicKey {
 				rawCert, err := ta.GenerateHostCert(services.HostCertParams{
 					CASigner:      caSigner,
-					CASigningAlg:  defaults.CASignatureAlgorithm,
 					PublicHostKey: pub,
 					HostID:        "host-id",
 					NodeName:      con.User(),
@@ -101,7 +97,6 @@ func TestServerKeyAuth(t *testing.T) {
 			key: func() ssh.PublicKey {
 				rawCert, err := ta.GenerateUserCert(services.UserCertParams{
 					CASigner:          caSigner,
-					CASigningAlg:      defaults.CASignatureAlgorithm,
 					PublicUserKey:     pub,
 					Username:          con.User(),
 					AllowedLogins:     []string{con.User()},
@@ -173,19 +168,20 @@ func TestCreateRemoteAccessPoint(t *testing.T) {
 			assertion: require.Error,
 		},
 		{
-			name:      "remote running 9.0.0",
+			name:      "remote running 11.0.0",
 			assertion: require.NoError,
-			version:   "9.0.0",
+			version:   "11.0.0",
 		},
 		{
-			name:      "remote running 8.0.0",
-			assertion: require.NoError,
-			version:   "8.0.0",
-		},
-		{
-			name:           "remote running 7.0.0",
+			name:           "remote running 10.0.0",
 			assertion:      require.NoError,
-			version:        "7.0.0",
+			version:        "10.0.0",
+			oldRemoteProxy: true,
+		},
+		{
+			name:           "remote running 9.0.0",
+			assertion:      require.NoError,
+			version:        "9.0.0",
 			oldRemoteProxy: true,
 		},
 		{

@@ -36,7 +36,6 @@ import (
 	"github.com/gravitational/teleport/lib/utils"
 	"github.com/sirupsen/logrus"
 
-	"github.com/gravitational/oxy/forward"
 	"github.com/gravitational/trace"
 )
 
@@ -151,13 +150,6 @@ func (t *transport) rewriteRequest(r *http.Request) error {
 	r.URL.Scheme = "https"
 	r.URL.Host = constants.APIDomain
 
-	// Don't trust any "X-Forward-*" headers the client sends, instead set own and then
-	// forward request.
-	headers := &forward.HeaderRewriter{
-		TrustForwardHeader: false,
-	}
-	headers.Rewrite(r)
-
 	// Remove the application session cookie from the header. This is done by
 	// first wiping out the "Cookie" header then adding back all cookies
 	// except the application session cookie. This appears to be the safest way
@@ -240,6 +232,7 @@ func dialAppServer(proxyClient reversetunnel.Tunnel, identity *tlsca.Identity, s
 		To:       &utils.NetAddr{AddrNetwork: "tcp", Addr: reversetunnel.LocalNode},
 		ServerID: fmt.Sprintf("%v.%v", server.GetHostID(), identity.RouteToApp.ClusterName),
 		ConnType: types.AppTunnel,
+		ProxyIDs: server.GetProxyIDs(),
 	})
 	if err != nil {
 		return nil, trace.Wrap(err)

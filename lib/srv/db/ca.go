@@ -27,6 +27,7 @@ import (
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/api/types"
 	awsutils "github.com/gravitational/teleport/api/utils/aws"
+	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/tlsca"
 	"github.com/gravitational/teleport/lib/utils"
 
@@ -45,8 +46,17 @@ func (s *Server) initCACert(ctx context.Context, database types.Database) error 
 	switch database.GetType() {
 	case types.DatabaseTypeRDS,
 		types.DatabaseTypeRedshift,
-		types.DatabaseTypeCloudSQL,
-		types.DatabaseTypeAzure:
+		types.DatabaseTypeElastiCache,
+		types.DatabaseTypeMemoryDB,
+		types.DatabaseTypeAWSKeyspaces,
+		types.DatabaseTypeCloudSQL:
+
+	case types.DatabaseTypeAzure:
+		// Azure Cache for Redis uses system cert poool
+		if database.GetProtocol() == defaults.ProtocolRedis {
+			return nil
+		}
+
 	default:
 		return nil
 	}
@@ -103,19 +113,40 @@ func (s *Server) getCACert(ctx context.Context, database types.Database) ([]byte
 // getCACertPath returns the path where automatically downloaded root certificate
 // for the provided database is stored in the filesystem.
 func (s *Server) getCACertPath(database types.Database) (string, error) {
-	// All RDS and Redshift instances share the same root CA which can be
-	// downloaded from a well-known URL (sometimes region-specific). Each
-	// Cloud SQL instance has its own CA.
 	switch database.GetType() {
+	// All RDS instances share the same root CA (per AWS region) which can be
+	// downloaded from a well-known URL.
 	case types.DatabaseTypeRDS:
 		return filepath.Join(s.cfg.DataDir, filepath.Base(rdsCAURLForDatabase(database))), nil
+
+	// All Redshift instances share the same root CA which can be downloaded
+	// from a well-known URL.
 	case types.DatabaseTypeRedshift:
 		return filepath.Join(s.cfg.DataDir, filepath.Base(redshiftCAURLForDatabase(database))), nil
+
+	// ElastiCache databases are signed with Amazon root CA. In most cases,
+	// x509.SystemCertPool should be sufficient to verify ElastiCache servers.
+	// However, x509.SystemCertPool does not support windows for go versions
+	// older than 1.18. In addition, system cert path can be overridden by
+	// environment variables on many OSes. Therefore, Amazon root CA is
+	// downloaded here to be safe.
+	//
+	// AWS MemoryDB uses same CA as ElastiCache.
+	case types.DatabaseTypeElastiCache,
+		types.DatabaseTypeMemoryDB:
+		return filepath.Join(s.cfg.DataDir, filepath.Base(amazonRootCA1URL)), nil
+
+	// Each Cloud SQL instance has its own CA.
 	case types.DatabaseTypeCloudSQL:
 		return filepath.Join(s.cfg.DataDir, fmt.Sprintf("%v-root.pem", database.GetName())), nil
+
 	case types.DatabaseTypeAzure:
 		return filepath.Join(s.cfg.DataDir, filepath.Base(azureCAURL)), nil
+
+	case types.DatabaseTypeAWSKeyspaces:
+		return filepath.Join(s.cfg.DataDir, filepath.Base(amazonKeyspacesCAURL)), nil
 	}
+
 	return "", trace.BadParameter("%v doesn't support automatic CA download", database)
 }
 
@@ -141,10 +172,15 @@ func (d *realDownloader) Download(ctx context.Context, database types.Database) 
 		return d.downloadFromURL(rdsCAURLForDatabase(database))
 	case types.DatabaseTypeRedshift:
 		return d.downloadFromURL(redshiftCAURLForDatabase(database))
+	case types.DatabaseTypeElastiCache,
+		types.DatabaseTypeMemoryDB:
+		return d.downloadFromURL(amazonRootCA1URL)
 	case types.DatabaseTypeCloudSQL:
 		return d.downloadForCloudSQL(ctx, database)
 	case types.DatabaseTypeAzure:
 		return d.downloadFromURL(azureCAURL)
+	case types.DatabaseTypeAWSKeyspaces:
+		return d.downloadFromURL(amazonKeyspacesCAURL)
 	}
 	return nil, trace.BadParameter("%v doesn't support automatic CA download", database)
 }
@@ -243,6 +279,10 @@ const (
 	//
 	// https://docs.amazonaws.cn/redshift/latest/mgmt/connecting-ssl-support.html
 	redshiftCNRegionCAURL = "https://s3.cn-north-1.amazonaws.com.cn/redshift-downloads-cn/amazon-trust-ca-bundle.crt"
+	// amazonRootCA1URL is the root CA for many Amazon websites and services.
+	//
+	// https://www.amazontrust.com/repository/
+	amazonRootCA1URL = "https://www.amazontrust.com/repository/AmazonRootCA1.pem"
 
 	// azureCAURL is the URL of the CA certificate for validating certificates
 	// presented by Azure hosted databases. See:
@@ -252,6 +292,12 @@ const (
 	azureCAURL = "https://www.digicert.com/CACerts/BaltimoreCyberTrustRoot.crt.pem"
 	// cloudSQLDownloadError is the error message that gets returned when
 	// we failed to download root certificate for Cloud SQL instance.
+
+	// amazonKeyspacesCAURL is the URL of the CA certificate for validating certificates
+	// presented by AWS Keyspace. See:
+	// https://docs.aws.amazon.com/keyspaces/latest/devguide/using_go_driver.html
+	amazonKeyspacesCAURL = "https://certs.secureserver.net/repository/sf-class2-root.crt"
+
 	cloudSQLDownloadError = `Could not download Cloud SQL CA certificate for database %v due to the following error:
 
     %v

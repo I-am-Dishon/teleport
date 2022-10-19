@@ -20,6 +20,7 @@ import (
 	"context"
 
 	"github.com/gravitational/teleport/api/types"
+	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/client"
 	"github.com/gravitational/teleport/lib/teleterm/api/uri"
 
@@ -27,6 +28,8 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/sirupsen/logrus"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 // Cluster describes user settings and access to various resources.
@@ -35,9 +38,10 @@ type Cluster struct {
 	URI uri.ResourceURI
 	// Name is the cluster name
 	Name string
-
+	// ProfileName is the name of the tsh profile
+	ProfileName string
 	// Log is a component logger
-	Log logrus.FieldLogger
+	Log *logrus.Entry
 	// dir is the directory where cluster certificates are stored
 	dir string
 	// Status is the cluster status
@@ -55,37 +59,74 @@ func (c *Cluster) Connected() bool {
 
 // GetRoles returns currently logged-in user roles
 func (c *Cluster) GetRoles(ctx context.Context) ([]*types.Role, error) {
-	proxyClient, err := c.clusterClient.ConnectToProxy(ctx)
+	var roles []*types.Role
+	err := addMetadataToRetryableError(ctx, func() error {
+		proxyClient, err := c.clusterClient.ConnectToProxy(ctx)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		defer proxyClient.Close()
+
+		for _, name := range c.status.Roles {
+			role, err := proxyClient.GetRole(ctx, name)
+			if err != nil {
+				return trace.Wrap(err)
+			}
+			roles = append(roles, &role)
+		}
+
+		return nil
+	})
 	if err != nil {
 		return nil, trace.Wrap(err)
-	}
-	defer proxyClient.Close()
-
-	roles := []*types.Role{}
-	for _, name := range c.status.Roles {
-		role, err := proxyClient.GetRole(ctx, name)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-		roles = append(roles, &role)
 	}
 
 	return roles, nil
 }
 
+// GetRequestableRoles returns the requestable roles for the currently logged-in user
+func (c *Cluster) GetRequestableRoles(ctx context.Context) ([]string, error) {
+	var (
+		authClient  auth.ClientI
+		proxyClient *client.ProxyClient
+		err         error
+		results     []string
+	)
+	err = addMetadataToRetryableError(ctx, func() error {
+		proxyClient, err = c.clusterClient.ConnectToProxy(ctx)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		defer proxyClient.Close()
+
+		authClient, err = proxyClient.ConnectToCluster(ctx, c.clusterClient.SiteName)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		defer authClient.Close()
+
+		response, err := authClient.GetAccessCapabilities(ctx, types.AccessCapabilitiesRequest{
+			RequestableRoles: true,
+		})
+		if err != nil {
+			return trace.Wrap(err)
+		}
+
+		results = append(results, response.RequestableRoles...)
+
+		return nil
+	})
+	return results, nil
+}
+
 // GetLoggedInUser returns currently logged-in user
 func (c *Cluster) GetLoggedInUser() LoggedInUser {
 	return LoggedInUser{
-		Name:      c.status.Username,
-		SSHLogins: c.status.Logins,
-		Roles:     c.status.Roles,
+		Name:           c.status.Username,
+		SSHLogins:      c.status.Logins,
+		Roles:          c.status.Roles,
+		ActiveRequests: c.status.ActiveRequests.AccessRequests,
 	}
-}
-
-// GetActualName returns name of the cluster taken from the key
-// (see an explanation for the field `actual_name` in cluster.proto)
-func (c *Cluster) GetActualName() string {
-	return c.clusterClient.SiteName
 }
 
 // GetProxyHost returns proxy address (host:port) of the cluster
@@ -101,4 +142,23 @@ type LoggedInUser struct {
 	SSHLogins []string
 	// Roles is the user roles
 	Roles []string
+	// ActiveRequests is the user active requests
+	ActiveRequests []string
+}
+
+// addMetadataToRetryableError is Connect's equivalent of client.RetryWithRelogin. By adding the
+// metadata to the error, we're letting the Electron app know that the given error was caused by
+// expired certs and letting the user log in again should resolve the error upon another attempt.
+func addMetadataToRetryableError(ctx context.Context, fn func() error) error {
+	err := fn()
+	if err == nil {
+		return nil
+	}
+
+	if client.IsErrorResolvableWithRelogin(err) {
+		trailer := metadata.Pairs("is-resolvable-with-relogin", "1")
+		grpc.SetTrailer(ctx, trailer)
+	}
+
+	return trace.Wrap(err)
 }

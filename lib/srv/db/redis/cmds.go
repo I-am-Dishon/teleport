@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/go-redis/redis/v8"
+	apiutils "github.com/gravitational/teleport/api/utils"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/srv/db/common"
@@ -48,9 +49,9 @@ const (
 
 // processCmd processes commands received from connected client. Most commands are just passed to Redis instance,
 // but some require special actions:
-//  * Redis 7.0+ commands are rejected as at the moment of writing Redis 7.0 hasn't been released and go-redis doesn't support it.
-//  * RESP3 commands are rejected as Teleport/go-redis currently doesn't support this version of protocol.
-//  * Subscribe related commands created a new DB connection as they change Redis request-response model to Pub/Sub.
+//   - Redis 7.0+ commands are rejected as at the moment of writing Redis 7.0 hasn't been released and go-redis doesn't support it.
+//   - RESP3 commands are rejected as Teleport/go-redis currently doesn't support this version of protocol.
+//   - Subscribe related commands created a new DB connection as they change Redis request-response model to Pub/Sub.
 func (e *Engine) processCmd(ctx context.Context, cmd *redis.Cmd) error {
 	switch strings.ToLower(cmd.Name()) {
 	case helloCmd, punsubscribeCmd, ssubscribeCmd, sunsubscribeCmd:
@@ -177,6 +178,17 @@ func (e *Engine) processAuth(ctx context.Context, cmd *redis.Cmd) error {
 			return trace.Wrap(err)
 		}
 
+		password, ok := cmd.Args()[1].(string)
+		if !ok {
+			return trace.BadParameter("password has a wrong type, expected string got %T", cmd.Args()[1])
+		}
+
+		// Pass empty username to login using AUTH <password> command.
+		e.redisClient, err = e.reconnect("", password)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+
 		return e.redisClient.Process(ctx, cmd)
 	case 3:
 		// Redis 6 version that contains username and password. Check the username against our RBAC before sending to Redis.
@@ -184,6 +196,15 @@ func (e *Engine) processAuth(ctx context.Context, cmd *redis.Cmd) error {
 		dbUser, ok := cmd.Args()[1].(string)
 		if !ok {
 			return trace.BadParameter("username has a wrong type, expected string got %T", cmd.Args()[1])
+		}
+
+		// For Teleport managed users, bypass the passwords sent here.
+		if apiutils.SliceContainsStr(e.sessionCtx.Database.GetManagedUsers(), e.sessionCtx.DatabaseUser) {
+			return trace.Wrap(e.sendToClient([]string{
+				"OK",
+				fmt.Sprintf("Please note that AUTH commands are ignored for Teleport managed user '%s'.", e.sessionCtx.DatabaseUser),
+				"Teleport service automatically authenticates managed users with the Redis server.",
+			}))
 		}
 
 		e.Audit.OnQuery(e.Context, e.sessionCtx, common.Query{Query: fmt.Sprintf("AUTH %s ****", dbUser)})

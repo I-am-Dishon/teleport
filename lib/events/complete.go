@@ -24,6 +24,7 @@ import (
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/api/types/events"
 	apiutils "github.com/gravitational/teleport/api/utils"
+	"github.com/gravitational/teleport/api/utils/retryutils"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/utils"
@@ -51,10 +52,8 @@ type UploadCompleterConfig struct {
 	CheckPeriod time.Duration
 	// Clock is used to override clock in tests
 	Clock clockwork.Clock
-	// DELETE IN 11.0.0 in favor of SessionTrackerService
-	// GracePeriod is the period after which an upload's session
-	// tracker will be check to see if it's an abandoned upload.
-	GracePeriod time.Duration
+	// ClusterName identifies the originating teleport cluster
+	ClusterName string
 }
 
 // CheckAndSetDefaults checks and sets default values
@@ -64,6 +63,9 @@ func (cfg *UploadCompleterConfig) CheckAndSetDefaults() error {
 	}
 	if cfg.SessionTracker == nil {
 		return trace.BadParameter("missing parameter SessionTracker")
+	}
+	if cfg.ClusterName == "" {
+		return trace.BadParameter("missing parameter ClusterName")
 	}
 	if cfg.Component == "" {
 		cfg.Component = teleport.ComponentAuth
@@ -116,12 +118,12 @@ func (u *UploadCompleter) Close() {
 	close(u.closeC)
 }
 
-// Serve runs the upload completer until closed or until ctx is cancelled.
+// Serve runs the upload completer until closed or until ctx is canceled.
 func (u *UploadCompleter) Serve(ctx context.Context) error {
 	periodic := interval.New(interval.Config{
 		Duration:      u.cfg.CheckPeriod,
 		FirstDuration: utils.HalfJitter(u.cfg.CheckPeriod),
-		Jitter:        utils.NewSeventhJitter(),
+		Jitter:        retryutils.NewSeventhJitter(),
 	})
 	defer periodic.Stop()
 
@@ -134,23 +136,13 @@ func (u *UploadCompleter) Serve(ctx context.Context) error {
 		case <-u.closeC:
 			return nil
 		case <-ctx.Done():
-			return trace.Wrap(ctx.Err(), "Context canceled")
+			return nil
 		}
 	}
 }
 
 // checkUploads fetches uploads and completes any abandoned uploads
 func (u *UploadCompleter) checkUploads(ctx context.Context) error {
-	trackers, err := u.cfg.SessionTracker.GetActiveSessionTrackers(ctx)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
-	var activeSessionIDs []string
-	for _, st := range trackers {
-		activeSessionIDs = append(activeSessionIDs, st.GetSessionID())
-	}
-
 	uploads, err := u.cfg.Uploader.ListUploads(ctx)
 	if err != nil {
 		return trace.Wrap(err)
@@ -165,20 +157,13 @@ func (u *UploadCompleter) checkUploads(ctx context.Context) error {
 
 	// Complete upload for any uploads without an active session tracker
 	for _, upload := range uploads {
-		// DELETE IN 11.0.0
-		// To support v9/v8 versions which do not use SessionTrackerService,
-		// sessions are only considered abandoned after the provided grace period.
-		if u.cfg.GracePeriod != 0 {
-			gracePoint := upload.Initiated.Add(u.cfg.GracePeriod)
-			if gracePoint.After(u.cfg.Clock.Now()) {
-				// uploads are ordered oldest to newest, stop checking
-				// once an upload doesn't exceed the grace point
-				return nil
-			}
-		}
-
-		if apiutils.SliceContainsStr(activeSessionIDs, upload.SessionID.String()) {
+		switch _, err := u.cfg.SessionTracker.GetSessionTracker(ctx, upload.SessionID.String()); {
+		case err == nil: // session is still in progress, continue to other uploads
+			u.log.Debugf("session %v has active tracker and is not ready to be uploaded", upload.SessionID)
 			continue
+		case trace.IsNotFound(err): // upload abandoned, complete upload
+		default: // aka err != nil
+			return trace.Wrap(err)
 		}
 
 		parts, err := u.cfg.Uploader.ListParts(ctx, upload)
@@ -190,11 +175,11 @@ func (u *UploadCompleter) checkUploads(ctx context.Context) error {
 			return trace.Wrap(err)
 		}
 
-		u.log.Debugf("Upload %v was abandoned, trying to complete.", upload.ID)
+		u.log.Debugf("Upload for session %v was abandoned, trying to complete.", upload.SessionID)
 		if err := u.cfg.Uploader.CompleteUpload(ctx, upload, parts); err != nil {
 			return trace.Wrap(err)
 		}
-		u.log.Debugf("Completed upload %v.", upload)
+		u.log.Debugf("Completed upload for session %v.", upload.SessionID)
 		completed++
 
 		if len(parts) == 0 {
@@ -203,10 +188,22 @@ func (u *UploadCompleter) checkUploads(ctx context.Context) error {
 
 		uploadData := u.cfg.Uploader.GetUploadMetadata(upload.SessionID)
 
+		// It's possible that we don't have a session ID here. For example,
+		// an S3 multipart upload may have been completed by another auth
+		// server, in which case the API returns an empty key, leaving us
+		// no way to derive the session ID from the upload.
+		//
+		// If this is the case, there's no work left to do, and we can
+		// proceed to the next upload.
+		if uploadData.SessionID == "" {
+			continue
+		}
+
 		// Schedule a background operation to check for (and emit) a session end event.
 		// This is necessary because we'll need to download the session in order to
 		// enumerate its events, and the S3 API takes a little while after the upload
 		// is completed before version metadata becomes available.
+		upload := upload // capture range variable
 		go func() {
 			select {
 			case <-ctx.Done():
@@ -220,10 +217,12 @@ func (u *UploadCompleter) checkUploads(ctx context.Context) error {
 		}()
 		session := &events.SessionUpload{
 			Metadata: events.Metadata{
-				Type:  SessionUploadEvent,
-				Code:  SessionUploadCode,
-				ID:    uuid.New().String(),
-				Index: SessionUploadIndex,
+				Type:        SessionUploadEvent,
+				Code:        SessionUploadCode,
+				Time:        u.cfg.Clock.Now().UTC(),
+				ID:          uuid.New().String(),
+				Index:       SessionUploadIndex,
+				ClusterName: u.cfg.ClusterName,
 			},
 			SessionMetadata: events.SessionMetadata{
 				SessionID: string(uploadData.SessionID),
@@ -327,6 +326,8 @@ loop:
 	}
 
 	u.log.Infof("emitting %T event for completed session %v", sessionEndEvent, uploadData.SessionID)
+
+	sessionEndEvent.SetTime(lastEvent.GetTime())
 
 	// Check and set event fields
 	if err := checkAndSetEventFields(sessionEndEvent, u.cfg.Clock, utils.NewRealUID(), sessionEndEvent.GetClusterName()); err != nil {
