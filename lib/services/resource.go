@@ -471,6 +471,22 @@ func init() {
 		return trustedCluster, nil
 	})
 
+	RegisterResourceMarshaler(types.KindOIDCConnector, func(resource types.Resource, opts ...MarshalOption) ([]byte, error) {
+		rsc, err := MarshalOIDCConnector(bytes) // XXX: Does not support marshal options.
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		return rsc, nil
+	})
+
+	RegisterResourceUnmarshaler(types.KindOIDCConnector, func(bytes []byte, opts ...MarshalOption) (types.Resource, error) {
+		rsc, err := UnmarshalOIDCConnector(bytes) // XXX: Does not support marshal options.
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		return rsc, nil
+	})
+
 	RegisterResourceMarshaler(types.KindGithubConnector, func(resource types.Resource, opts ...MarshalOption) ([]byte, error) {
 		githubConnector, ok := resource.(types.GithubConnector)
 		if !ok {

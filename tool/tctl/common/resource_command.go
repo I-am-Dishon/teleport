@@ -106,6 +106,7 @@ func (rc *ResourceCommand) Initialize(app *kingpin.Application, config *service.
 		types.KindDatabase:                rc.createDatabase,
 		types.KindToken:                   rc.createToken,
 		types.KindInstaller:               rc.createInstaller,
+		types.KindOIDCConnector:           rc.createOIDCConnector,
 	}
 	rc.config = config
 
@@ -271,9 +272,11 @@ func (rc *ResourceCommand) Create(ctx context.Context, client auth.ClientI) (err
 
 		// locate the creator function for a given resource kind:
 		creator, found := rc.CreateHandlers[ResourceKind(raw.Kind)]
+		fmt.Printf("creator %v has been updated\n", creator)
 		if !found {
 			// if we're trying to create an OIDC/SAML connector with the OSS version of tctl, return a specific error
-			if raw.Kind == "oidc" || raw.Kind == "saml" {
+			// if raw.Kind == "oidc" || raw.Kind == "saml" {
+			if  raw.Kind == "saml" {
 				return trace.BadParameter("creating resources of type %q is only supported in Teleport Enterprise. If you are connecting to a Teleport Enterprise Cluster you must install the enterprise version of tctl. https://goteleport.com/teleport/docs/enterprise/", raw.Kind)
 			}
 			return trace.BadParameter("creating resources of type %q is not supported", raw.Kind)
@@ -339,6 +342,33 @@ func (rc *ResourceCommand) createCertAuthority(ctx context.Context, client auth.
 	fmt.Printf("certificate authority '%s' has been updated\n", certAuthority.GetName())
 	return nil
 }
+
+// createOIDCConnector creates a OIDC connector
+func (rc *ResourceCommand) createOIDCConnector(client auth.ClientI, raw services.UnknownResource) error {
+	ctx := context.TODO()
+	connector, err := services.UnmarshalOIDCConnector(raw.Raw)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+
+	_, err = client.GetOIDCConnector(ctx, connector.GetName(), false)
+	if err != nil && !trace.IsNotFound(err) {
+		return trace.Wrap(err)
+	}
+	exists := (err == nil)
+	if !rc.force && exists {
+		return trace.AlreadyExists("authentication connector %q already exists",
+			connector.GetName())
+	}
+	err = client.UpsertOIDCConnector(ctx, connector)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	fmt.Printf("authentication connector %q has been %s\n",
+		connector.GetName(), UpsertVerb(exists, rc.force))
+	return nil
+}
+
 
 // createGithubConnector creates a Github connector
 func (rc *ResourceCommand) createGithubConnector(ctx context.Context, client auth.ClientI, raw services.UnknownResource) error {
